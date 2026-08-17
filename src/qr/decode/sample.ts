@@ -98,22 +98,22 @@ export interface AlignmentMatch {
 }
 
 /**
- * Find the bottom-right alignment pattern.
+ * Find candidates for the bottom-right alignment pattern, nearest-first.
  *
- * Searches a window around where the three-finder fit predicts it should be.
- * Returning null is an ordinary outcome, not a failure: version 1 has no
+ * An empty list is an ordinary outcome, not a failure: version 1 has no
  * alignment pattern at all, and the caller falls back to extrapolating the
  * fourth corner from the three finders.
  */
-export function findAlignmentPattern(
+export function findAlignmentCandidates(
 	image: BitMatrix,
 	transform: PerspectiveTransform,
 	version: number,
 	dimension: number,
-): AlignmentMatch | null {
+	limit = 3,
+): AlignmentMatch[] {
 	const centres = ALIGNMENT_CENTRES[version - 1] as readonly number[];
 	if (centres.length === 0) {
-		return null;
+		return [];
 	}
 
 	// The bottom-right alignment pattern, in symbol coordinates.
@@ -126,7 +126,7 @@ export function findAlignmentPattern(
 		transform.apply(centre + 1.5, centre + 0.5).y - expected.y,
 	);
 	if (!Number.isFinite(oneModule) || oneModule <= 0) {
-		return null;
+		return [];
 	}
 
 	// The search window has to cover how wrong the prediction can be, not how
@@ -139,15 +139,23 @@ export function findAlignmentPattern(
 		4,
 		Math.round(Math.min(oneModule * 6 + dimension * oneModule * 0.12, 160)),
 	);
-	const found = searchAlignment(
+	// Several candidates, nearest the prediction first, rather than one.
+	//
+	// The window has to be wide because the prediction is poor, and a wide
+	// window on a large symbol can easily contain an *inner* alignment pattern
+	// that happens to sit closer to a badly-off prediction than the bottom-right
+	// one does. Committing to the nearest single hit then drags the whole grid
+	// off the symbol. Handing back a short list and letting the decode decide is
+	// both simpler and more reliable, because the decode is exact and this is a
+	// guess.
+	return searchAlignment(
 		image,
 		Math.round(expected.x),
 		Math.round(expected.y),
 		radius,
 		oneModule,
-	);
-
-	return found === null ? null : { point: found, source: centre + 0.5 };
+		limit,
+	).map((point) => ({ point, source: centre + 0.5 }));
 }
 
 /**
@@ -166,8 +174,8 @@ export function findAlignmentPattern(
  * outside: three finders located, a confident-looking fit, and a payload that
  * decodes as nothing at all.
  *
- * Candidates are collected across the whole window and the one nearest the
- * prediction wins, rather than taking the first hit of an outward spiral.
+ * Candidates are collected across the whole window and returned nearest-first,
+ * rather than taking the first hit of an outward spiral.
  */
 function searchAlignment(
 	image: BitMatrix,
@@ -175,8 +183,9 @@ function searchAlignment(
 	cy: number,
 	radius: number,
 	moduleSize: number,
-): Point | null {
-	let best: { point: Point; distance: number } | null = null;
+	limit: number,
+): Point[] {
+	const found: { point: Point; distance: number }[] = [];
 
 	for (let dy = -radius; dy <= radius; dy += 1) {
 		const y = cy + dy;
@@ -201,13 +210,23 @@ function searchAlignment(
 
 			const point = { x: horizontal, y: vertical };
 			const distance = Math.hypot(point.x - cx, point.y - cy);
-			if (best === null || distance < best.distance) {
-				best = { point, distance };
+
+			// Cluster: many starting pixels inside one pattern resolve to the
+			// same centre, and those are one candidate rather than hundreds.
+			const already = found.some(
+				(candidate) =>
+					Math.hypot(candidate.point.x - point.x, candidate.point.y - point.y) < moduleSize,
+			);
+			if (!already) {
+				found.push({ point, distance });
 			}
 		}
 	}
 
-	return best?.point ?? null;
+	return found
+		.sort((a, b) => a.distance - b.distance)
+		.slice(0, limit)
+		.map((candidate) => candidate.point);
 }
 
 /**

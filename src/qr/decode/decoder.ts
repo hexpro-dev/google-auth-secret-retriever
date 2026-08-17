@@ -14,7 +14,7 @@ import {
 	upscaleNearest,
 } from './grey.js';
 import { decodeMatrix } from './matrix-decoder.js';
-import { findAlignmentPattern, sampleGrid } from './sample.js';
+import { type AlignmentMatch, findAlignmentCandidates, sampleGrid } from './sample.js';
 import type { DecodeFailureReason, DecodeFrame, TelemetrySink } from './telemetry.js';
 import { buildSamplingTransform } from './transform.js';
 
@@ -191,87 +191,87 @@ function attemptOnMatrix(
 				continue;
 			}
 
-			// Fit from the three finders, find the alignment pattern that fit
-			// predicts, refit with four points, then look again.
+			// Fit from the three finders, then look for the bottom-right
+			// alignment pattern that fit predicts.
 			//
-			// The second pass matters on a real perspective view. The first fit
-			// is affine, so its prediction for the far corner is off by a
-			// noticeable fraction of the symbol; once the fourth point pulls the
-			// transform into shape, the pattern can be relocated much more
-			// precisely, and the refit from *that* is what makes the sampling
-			// grid actually lie on the modules.
-			let transform = buildSamplingTransform(dimension, topLeft, topRight, bottomLeft, null, 0);
-			let alignment = findAlignmentPattern(source, transform, version, dimension);
+			// Several hypotheses are tried, not one, and the plain three-point
+			// fit is among them. That fit is the right answer for a flat scan
+			// and the only answer for version 1, which has no alignment pattern
+			// at all. Where an alignment pattern does exist, the first fit is
+			// affine, so on a perspective view its prediction for the far corner
+			// is off by a noticeable fraction of the symbol; the search window
+			// has to be wide enough to cover that, and a wide window on a large
+			// symbol can contain an inner alignment pattern sitting closer to
+			// the bad prediction than the right one. Committing to a single
+			// guess drags the whole grid off the symbol, so instead each
+			// hypothesis is handed to the decode, which is exact and can simply
+			// reject the wrong ones.
+			const initial = buildSamplingTransform(dimension, topLeft, topRight, bottomLeft, null, 0);
+			const hypotheses: Array<AlignmentMatch | null> = [
+				null,
+				...findAlignmentCandidates(source, initial, version, dimension),
+			];
 
-			for (let pass = 0; pass < 2 && alignment !== null; pass += 1) {
-				transform = buildSamplingTransform(
-					dimension,
-					topLeft,
-					topRight,
-					bottomLeft,
-					alignment.point,
-					alignment.source,
-				);
-				const refined = findAlignmentPattern(source, transform, version, dimension);
-				if (refined === null) {
-					break;
+			for (const alignment of hypotheses) {
+				const transform =
+					alignment === null
+						? initial
+						: buildSamplingTransform(
+								dimension,
+								topLeft,
+								topRight,
+								bottomLeft,
+								alignment.point,
+								alignment.source,
+							);
+
+				const sampled = sampleGrid(source, transform, dimension, { robust });
+				if (sampled === null) {
+					continue;
 				}
-				const moved = Math.hypot(
-					refined.point.x - alignment.point.x,
-					refined.point.y - alignment.point.y,
-				);
-				alignment = refined;
-				if (moved < 1) {
-					break;
-				}
-			}
 
-			const sampled = sampleGrid(source, transform, dimension, { robust });
-			if (sampled === null) {
-				continue;
-			}
+				const corners: Point[] = [
+					transform.apply(0, 0),
+					transform.apply(dimension, 0),
+					transform.apply(dimension, dimension),
+					transform.apply(0, dimension),
+				].map((point) => ({ x: point.x * scaleBack, y: point.y * scaleBack }));
 
-			const corners: Point[] = [
-				transform.apply(0, 0),
-				transform.apply(dimension, 0),
-				transform.apply(dimension, dimension),
-				transform.apply(0, dimension),
-			].map((point) => ({ x: point.x * scaleBack, y: point.y * scaleBack }));
+				// Straight, then transposed. The second attempt is what reads a
+				// mirrored symbol, which the finder geometry cannot distinguish and
+				// which a photo of a reflection or a front-facing camera produces.
+				//
+				// Telemetry is emitted only once a candidate actually decodes, so a
+				// consumer never draws a sampling grid for a size that turned out to
+				// be wrong.
+				for (const candidate of [sampled, sampled.transposed()]) {
+					try {
+						const result = decodeMatrix(candidate);
 
-			// Straight, then transposed. The second attempt is what reads a
-			// mirrored symbol, which the finder geometry cannot distinguish and
-			// which a photo of a reflection or a front-facing camera produces.
-			//
-			// Telemetry is emitted only once a candidate actually decodes, so a
-			// consumer never draws a sampling grid for a size that turned out to
-			// be wrong.
-			for (const candidate of [sampled, sampled.transposed()]) {
-				try {
-					const result = decodeMatrix(candidate);
+						emit?.({
+							stage: 'located',
+							corners: corners as unknown as readonly [Point, Point, Point, Point],
+							dimension,
+							alignment:
+								alignment === null
+									? null
+									: { x: alignment.point.x * scaleBack, y: alignment.point.y * scaleBack },
+							transform: [...transform.coefficients],
+						});
+						emit?.({ stage: 'sampled', dimension, modules: new Uint8Array(candidate.bits) });
+						emit?.({
+							stage: 'corrected',
+							version: result.version,
+							ecLevel: result.ecLevel,
+							blocks: 0,
+							errorsCorrected: result.errorsCorrected,
+						});
 
-					emit?.({
-						stage: 'located',
-						corners: corners as unknown as readonly [Point, Point, Point, Point],
-						dimension,
-						alignment:
-							alignment === null
-								? null
-								: { x: alignment.point.x * scaleBack, y: alignment.point.y * scaleBack },
-						transform: [...transform.coefficients],
-					});
-					emit?.({ stage: 'sampled', dimension, modules: new Uint8Array(candidate.bits) });
-					emit?.({
-						stage: 'corrected',
-						version: result.version,
-						ecLevel: result.ecLevel,
-						blocks: 0,
-						errorsCorrected: result.errorsCorrected,
-					});
-
-					return { result, corners };
-				} catch {
-					// Not a symbol at this size, or the wrong handedness. Fall
-					// through rather than giving up on the whole image.
+						return { result, corners };
+					} catch {
+						// Not a symbol at this size or fit, or the wrong
+						// handedness. Fall through rather than giving up.
+					}
 				}
 			}
 		}
