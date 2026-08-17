@@ -1,0 +1,109 @@
+<!--CSP-->
+<title>Google Authenticator secret retriever</title>
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<meta name="robots" content="noindex" />
+<style>
+	<!--STYLE-->
+</style>
+
+<main>
+	<h1>Google Authenticator secret retriever</h1>
+
+	<p class="lede">
+		Drop in a screenshot of the Export accounts code. This page decodes the QR, reads the payload
+		inside it, and lists every account with its base32 secret and the parameters that go with it.
+	</p>
+
+	<p class="claim">
+		Everything happens in this page. There is no code here that opens a network connection, so
+		nothing you load can be sent anywhere. Turn your connection off and use it anyway: that is the
+		check worth doing, and it works.
+	</p>
+
+	<section id="drop" class="drop">
+		<h2>Add an export code</h2>
+		<p>
+			Drop a screenshot anywhere on this page, paste one, choose a file, or use the camera. Google
+			Authenticator splits large exports across two or three codes; add them one at a time in any
+			order.
+		</p>
+
+		<div class="row">
+			<label class="button">
+				Choose a file
+				<input id="file" type="file" accept="image/*" multiple hidden />
+			</label>
+			<button id="camera-toggle" type="button" class="button ghost">Use the camera</button>
+		</div>
+
+		<p id="camera-note" class="dim small" hidden>
+			The camera is not available here, which is usual when this file is opened directly from disk.
+			Dropping or pasting a screenshot always works. To use the camera, serve this file over http:
+			run <code class="mono">python3 -m http.server</code> in the folder holding it and open the
+			address it prints.
+		</p>
+
+		<video id="video" playsinline muted hidden></video>
+
+		<div id="paste-box">
+			<label for="paste-text">
+				Or paste an <code class="mono">otpauth-migration://</code> link, if you already have one
+			</label>
+			<textarea id="paste-text" rows="2" spellcheck="false" dir="ltr"></textarea>
+			<button id="paste-read" type="button" class="button ghost">Read the link</button>
+		</div>
+	</section>
+
+	<p id="notice" class="notice" hidden></p>
+	<p id="progress" class="progress" hidden></p>
+
+	<section class="output">
+		<div class="output-head">
+			<h2>Accounts</h2>
+			<span id="count" class="dim mono"></span>
+		</div>
+
+		<div id="actions" class="row" hidden>
+			<button id="reveal-all" type="button" class="button ghost">Reveal all</button>
+			<button id="mask-all" type="button" class="button ghost">Hide all</button>
+			<button id="clear" type="button" class="button ghost danger">Clear everything</button>
+		</div>
+
+		<div id="results"></div>
+	</section>
+
+	<section class="warning">
+		<h2>Treat the export code as you would the passwords themselves</h2>
+		<p>
+			A Google Authenticator export code carries the secret key for every account inside it. Anyone
+			who photographs it, or finds the screenshot in a photo backup a year from now, can generate
+			your codes indefinitely. Changing your password does not revoke it. Removing the app does not
+			revoke it.
+		</p>
+		<p>
+			So do this on a device you trust, on a screen nobody is standing behind. Do not send the code
+			to yourself in a chat to have it handy, and delete the screenshot when you are finished,
+			including from the recently deleted folder.
+		</p>
+		<p>
+			The secrets shown above are as sensitive as the code they came from. They are held in this
+			page and nowhere else, so closing the tab is enough. Copying one out makes it your job to look
+			after.
+		</p>
+	</section>
+
+	<footer>
+		<p>
+			Version <span id="version" class="mono"></span>. MIT licensed. The source lives at
+			github.com/hexpro-dev/google-auth-secret-retriever
+		</p>
+		<p class="dim small">
+			Nothing is written to storage: no account, no history, no saved state. Reloading gives you an
+			empty page.
+		</p>
+	</footer>
+</main>
+
+<script>
+	<!--SCRIPT-->
+</script>

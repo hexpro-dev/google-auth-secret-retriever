@@ -43,7 +43,10 @@ export interface CameraDeps {
 }
 
 export interface VideoLike {
-	srcObject: MediaStream | null;
+	// `MediaProvider` rather than `MediaStream`, because that is what
+	// HTMLVideoElement actually declares and narrowing it here would force
+	// every caller into a cast.
+	srcObject: MediaProvider | null;
 	readonly videoWidth: number;
 	readonly videoHeight: number;
 	play(): Promise<void>;
