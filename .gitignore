@@ -1,0 +1,35 @@
+# Dependencies
+node_modules/
+
+# Build outputs
+dist/
+*.tsbuildinfo
+
+# Logs
+*.log
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Testing
+coverage/
+.nyc_output/
+
+# Never commit real export data. This repository is public and git history is
+# permanent, so the guard is a gitignore rather than a code review habit. A real
+# Google Authenticator export QR is the full credential for every account in it.
+# See the top of CLAUDE.md. Every fixture in tests/ is generated synthetically by
+# scripts/generate-fixtures.ts and verified by hash in CI.
+scratch/
+*.private.*
+real-*.png
+real-*.jpg
+real-*.jpeg

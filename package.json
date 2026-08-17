@@ -1,0 +1,94 @@
+{
+	"name": "@hexpro/google-auth-secret-retriever",
+	"version": "0.1.0",
+	"description": "Extract otpauth URIs and base32 secrets from Google Authenticator export QR codes, entirely in the browser",
+	"keywords": [
+		"google-authenticator",
+		"otpauth",
+		"otpauth-migration",
+		"totp",
+		"hotp",
+		"qr",
+		"qrcode",
+		"2fa",
+		"mfa",
+		"offline"
+	],
+	"type": "module",
+	"main": "./dist/index.js",
+	"types": "./dist/index.d.ts",
+	"sideEffects": false,
+	"exports": {
+		".": {
+			"types": "./dist/index.d.ts",
+			"import": "./dist/index.js"
+		},
+		"./dom": {
+			"types": "./dist/dom/index.d.ts",
+			"import": "./dist/dom/index.js"
+		},
+		"./qr": {
+			"types": "./dist/qr/index.d.ts",
+			"import": "./dist/qr/index.js"
+		},
+		"./standalone.html": "./dist/google-auth-secret-retriever.html"
+	},
+	"files": [
+		"dist",
+		"package.json",
+		"LICENSE",
+		"README.md",
+		"CHANGELOG.md"
+	],
+	"publishConfig": {
+		"access": "public"
+	},
+	"repository": {
+		"type": "git",
+		"url": "git+https://github.com/hexpro-dev/google-auth-secret-retriever.git"
+	},
+	"homepage": "https://github.com/hexpro-dev/google-auth-secret-retriever#readme",
+	"bugs": {
+		"url": "https://github.com/hexpro-dev/google-auth-secret-retriever/issues"
+	},
+	"packageManager": "pnpm@10.33.0",
+	"scripts": {
+		"build": "tsc",
+		"build:html": "tsx scripts/build-html.ts",
+		"build:all": "pnpm run build && pnpm run build:html",
+		"clean": "rimraf dist coverage",
+		"typecheck": "tsc --noEmit && tsc -p tsconfig.test.json",
+		"lint": "eslint .",
+		"lint:fix": "eslint . --fix",
+		"format": "prettier --write .",
+		"format:check": "prettier --check .",
+		"test": "vitest run",
+		"test:watch": "vitest",
+		"test:coverage": "vitest run --coverage",
+		"fixtures": "tsx scripts/generate-fixtures.ts",
+		"fixtures:verify": "tsx scripts/generate-fixtures.ts --verify",
+		"prepublishOnly": "pnpm run clean && pnpm run build:all && pnpm run typecheck && pnpm run test"
+	},
+	"dependencies": {},
+	"devDependencies": {
+		"@eslint/js": "^9.17.0",
+		"@types/node": "^22.10.2",
+		"@types/pngjs": "^6.0.5",
+		"@types/qrcode": "^1.5.5",
+		"@vitest/coverage-v8": "^2.1.8",
+		"esbuild": "^0.24.0",
+		"eslint": "^9.17.0",
+		"pngjs": "^7.0.0",
+		"prettier": "^3.4.2",
+		"qrcode": "1.5.4",
+		"rimraf": "^6.0.1",
+		"tsx": "^4.19.2",
+		"typescript": "^5.7.2",
+		"typescript-eslint": "^8.18.2",
+		"vitest": "^2.1.8"
+	},
+	"engines": {
+		"node": ">=22.0.0"
+	},
+	"license": "MIT"
+}
