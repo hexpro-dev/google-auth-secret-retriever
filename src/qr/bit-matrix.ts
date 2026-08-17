@@ -77,6 +77,25 @@ export class BitMatrix {
 		return out;
 	}
 
+	/**
+	 * Reflect across the leading diagonal.
+	 *
+	 * This is how a mirrored symbol is recovered. Mirroring is invisible to the
+	 * finder geometry (a reflected code has three finders in exactly the same
+	 * L), so it cannot be detected before sampling. Once sampled, though, a
+	 * mirrored symbol is precisely the transpose of a readable one, and 441
+	 * bytes of transpose is far cheaper than a second pass over the image.
+	 */
+	transposed(): BitMatrix {
+		const out = new BitMatrix(this.height, this.width);
+		for (let y = 0; y < this.height; y += 1) {
+			for (let x = 0; x < this.width; x += 1) {
+				out.set(y, x, this.get(x, y));
+			}
+		}
+		return out;
+	}
+
 	countDark(): number {
 		let count = 0;
 		for (let i = 0; i < this.bits.length; i += 1) {

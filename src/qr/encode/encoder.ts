@@ -3,10 +3,10 @@ import type { EcLevel, QrMode } from '../../types.js';
 import { encodeFormatInfo, encodeVersionInfo } from '../bch.js';
 import { BitWriter } from '../bit-buffer.js';
 import { BitMatrix } from '../bit-matrix.js';
+import { drawFunctionPatterns, walkDataModules } from '../function-patterns.js';
 import { MASK_PATTERNS, penaltyScore } from '../mask.js';
 import { rsEncode } from '../reed-solomon.js';
 import {
-	ALIGNMENT_CENTRES,
 	ALPHANUMERIC_CHARS,
 	MODE_BITS,
 	REMAINDER_BITS,
@@ -216,141 +216,6 @@ function interleave(dataCodewords: Uint8Array, version: number, level: EcLevel):
 
 /* ── Module placement ─────────────────────────────────────────────────────── */
 
-function placeFinder(matrix: BitMatrix, reserved: BitMatrix, x: number, y: number): void {
-	for (let dy = -1; dy <= 7; dy += 1) {
-		for (let dx = -1; dx <= 7; dx += 1) {
-			const px = x + dx;
-			const py = y + dy;
-			if (px < 0 || py < 0 || px >= matrix.width || py >= matrix.height) {
-				continue;
-			}
-			// The 7x7 pattern is a filled 3x3 inside a ring; everything else in
-			// the 9x9 footprint is the light separator.
-			const inRing =
-				(dx >= 0 && dx <= 6 && (dy === 0 || dy === 6)) ||
-				(dy >= 0 && dy <= 6 && (dx === 0 || dx === 6));
-			const inCore = dx >= 2 && dx <= 4 && dy >= 2 && dy <= 4;
-			matrix.set(px, py, inRing || inCore);
-			reserved.set(px, py, true);
-		}
-	}
-}
-
-function placeAlignment(matrix: BitMatrix, reserved: BitMatrix, version: number): void {
-	const centres = ALIGNMENT_CENTRES[version - 1] as readonly number[];
-	const dimension = matrix.width;
-
-	for (const cy of centres) {
-		for (const cx of centres) {
-			// The three corners hosting finder patterns are skipped.
-			const nearFinder =
-				(cx <= 8 && cy <= 8) ||
-				(cx <= 8 && cy >= dimension - 9) ||
-				(cx >= dimension - 9 && cy <= 8);
-			if (nearFinder) {
-				continue;
-			}
-
-			for (let dy = -2; dy <= 2; dy += 1) {
-				for (let dx = -2; dx <= 2; dx += 1) {
-					const dark = Math.max(Math.abs(dx), Math.abs(dy)) !== 1;
-					matrix.set(cx + dx, cy + dy, dark);
-					reserved.set(cx + dx, cy + dy, true);
-				}
-			}
-		}
-	}
-}
-
-function placeTiming(matrix: BitMatrix, reserved: BitMatrix): void {
-	const dimension = matrix.width;
-	for (let i = 8; i < dimension - 8; i += 1) {
-		const dark = i % 2 === 0;
-		matrix.set(i, 6, dark);
-		reserved.set(i, 6, true);
-		matrix.set(6, i, dark);
-		reserved.set(6, i, true);
-	}
-}
-
-/**
- * Reserve the format and version regions before data is placed into them.
- *
- * Derived from the same position tables the writers use, rather than
- * re-deriving the geometry. If the two ever disagreed, data would be placed
- * into cells that are later overwritten by information bits, and the payload
- * would decode as noise for exactly the versions where they diverged.
- */
-function reserveInformation(reserved: BitMatrix, version: number): void {
-	const dimension = reserved.width;
-
-	// The whole 9-module arm of each format region, including the timing
-	// module it steps over and the dark module.
-	for (let i = 0; i < 9; i += 1) {
-		reserved.set(i, 8, true);
-		reserved.set(8, i, true);
-	}
-	for (let i = 0; i < 8; i += 1) {
-		reserved.set(dimension - 1 - i, 8, true);
-		reserved.set(8, dimension - 1 - i, true);
-	}
-
-	if (version >= 7) {
-		const { first, second } = versionInfoPositions(dimension);
-		for (const [x, y] of [...first, ...second]) {
-			reserved.set(x, y, true);
-		}
-	}
-}
-
-/**
- * Walk the data region, two columns at a time, right to left, zigzagging.
- *
- * Column 6 is skipped because it carries the vertical timing pattern, and that
- * single exception is the detail most implementations get wrong.
- */
-function placeData(
-	matrix: BitMatrix,
-	reserved: BitMatrix,
-	codewords: Uint8Array,
-	version: number,
-): void {
-	const dimension = matrix.width;
-	const totalBits = codewords.length * 8 + (REMAINDER_BITS[version - 1] as number);
-
-	let bitIndex = 0;
-	let upward = true;
-
-	for (let right = dimension - 1; right >= 1; right -= 2) {
-		if (right === 6) {
-			right = 5;
-		}
-
-		for (let step = 0; step < dimension; step += 1) {
-			const y = upward ? dimension - 1 - step : step;
-
-			for (let column = 0; column < 2; column += 1) {
-				const x = right - column;
-				if (reserved.get(x, y)) {
-					continue;
-				}
-				if (bitIndex >= totalBits) {
-					continue;
-				}
-
-				// Remainder bits are zero and carry nothing, but they occupy
-				// positions, so they must still be stepped over.
-				const byte = codewords[bitIndex >>> 3];
-				const bit = byte === undefined ? false : ((byte >>> (7 - (bitIndex & 7))) & 1) === 1;
-				matrix.set(x, y, bit);
-				bitIndex += 1;
-			}
-		}
-
-		upward = !upward;
-	}
-}
-
 function placeFormatInfo(matrix: BitMatrix, level: EcLevel, mask: number): void {
 	const dimension = matrix.width;
 	const bits = encodeFormatInfo(level, mask);
@@ -400,14 +265,20 @@ function buildMatrix(
 	const matrix = new BitMatrix(dimension);
 	const reserved = new BitMatrix(dimension);
 
-	placeFinder(matrix, reserved, 0, 0);
-	placeFinder(matrix, reserved, dimension - 7, 0);
-	placeFinder(matrix, reserved, 0, dimension - 7);
-	placeTiming(matrix, reserved);
-	placeAlignment(matrix, reserved, version);
-	reserveInformation(reserved, version);
+	drawFunctionPatterns(matrix, reserved, version);
 
-	placeData(matrix, reserved, codewords, version);
+	// Data, in the zigzag order the specification lays out. The remainder bits
+	// at the end are zero and carry nothing, but they occupy module positions,
+	// so the traversal has to step over them rather than stop early.
+	const totalBits = codewords.length * 8 + (REMAINDER_BITS[version - 1] as number);
+	walkDataModules(dimension, reserved, (x, y, index) => {
+		if (index >= totalBits) {
+			return;
+		}
+		const byte = codewords[index >>> 3];
+		const bit = byte === undefined ? false : ((byte >>> (7 - (index & 7))) & 1) === 1;
+		matrix.set(x, y, bit);
+	});
 
 	// Masking applies to the data region only; function patterns are untouched.
 	const predicate = MASK_PATTERNS[mask] as (row: number, column: number) => boolean;
