@@ -73,6 +73,20 @@ describe('decodeBase64Loose', () => {
 		}
 	});
 
+	it('rejects a character from outside ASCII', () => {
+		// A payload that has been through a word processor can come back with a
+		// soft hyphen (U+00AD) inserted at a line break. It is invisible, it is
+		// not stripped as whitespace, and it is not base64, so the only useful
+		// answer is a failure that names the position.
+		try {
+			decodeBase64Loose('Zm9v\u00adYmE');
+			expect.unreachable('should have thrown');
+		} catch (error) {
+			expect(error).toBeInstanceOf(Base64DecodeError);
+			expect((error as Base64DecodeError).index).toBe(4);
+		}
+	});
+
 	it('rejects a final group carrying bits that should be zero', () => {
 		expect(() => decodeBase64Loose('Zg==')).not.toThrow();
 		expect(() => decodeBase64Loose('Zh==')).toThrow(Base64DecodeError);

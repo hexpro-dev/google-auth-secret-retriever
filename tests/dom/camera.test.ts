@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
 	type CameraDeps,
 	type VideoLike,
@@ -86,11 +86,46 @@ function scanningCanvas(image: ImageDataLike): () => CanvasLike {
 	});
 }
 
+/** Just enough of `document` for the default visibility wiring. */
+function fakeDocument(): {
+	visibilityState: string;
+	readonly listeners: number;
+	addEventListener(type: string, handler: () => void): void;
+	removeEventListener(type: string, handler: () => void): void;
+	fire(): void;
+} {
+	const handlers = new Set<() => void>();
+
+	return {
+		visibilityState: 'visible',
+		get listeners() {
+			return handlers.size;
+		},
+		addEventListener(type: string, handler: () => void) {
+			if (type === 'visibilitychange') {
+				handlers.add(handler);
+			}
+		},
+		removeEventListener(_type: string, handler: () => void) {
+			handlers.delete(handler);
+		},
+		fire() {
+			for (const handler of [...handlers]) {
+				handler();
+			}
+		},
+	};
+}
+
 function blankCanvas(): () => CanvasLike {
 	const data = new Uint8ClampedArray(200 * 200 * 4);
 	data.fill(255);
 	return scanningCanvas({ data, width: 200, height: 200 });
 }
+
+afterEach(() => {
+	vi.unstubAllGlobals();
+});
 
 describe('isCameraAvailable', () => {
 	it('needs both a secure context and the API', () => {
@@ -99,6 +134,28 @@ describe('isCameraAvailable', () => {
 		expect(isCameraAvailable({ isSecureContext: true, getUserMedia })).toBe(true);
 		expect(isCameraAvailable({ isSecureContext: false, getUserMedia })).toBe(false);
 		expect(isCameraAvailable({ isSecureContext: true })).toBe(false);
+	});
+
+	it('reads the page it is running in when nothing is injected', () => {
+		// What a consumer calls. Answering from injected deps only would leave the
+		// real reading untested, and this is the answer a page uses to decide
+		// whether to offer the camera button at all.
+		vi.stubGlobal('isSecureContext', true);
+		vi.stubGlobal('navigator', {
+			mediaDevices: { getUserMedia: async () => fakeStream([]) },
+		});
+		expect(isCameraAvailable()).toBe(true);
+
+		// A browser old enough to have no mediaDevices, which is the case the
+		// button has to be hidden for.
+		vi.stubGlobal('navigator', {});
+		expect(isCameraAvailable()).toBe(false);
+	});
+
+	it('answers false where there is no page to ask', () => {
+		// Server-side rendering, where `isSecureContext` does not exist. A camera
+		// button rendered there is a button that cannot work.
+		expect(isCameraAvailable()).toBe(false);
 	});
 });
 
@@ -156,6 +213,30 @@ describe('startCameraScan failure mapping', () => {
 		).rejects.toMatchObject({ code: 'camera/unavailable', reason: 'no-device' });
 	});
 
+	it('reports the request ending when the camera will not open', async () => {
+		// A caller showing a spinner on `requesting` would spin forever otherwise,
+		// even though it is about to be handed the error.
+		const states: string[] = [];
+
+		await expect(
+			startCameraScan({
+				video: fakeVideo(),
+				onResult: () => undefined,
+				onStatus: (status) => states.push(status.state),
+				deps: {
+					isSecureContext: true,
+					getUserMedia: async () => {
+						const error = new Error('NotAllowedError');
+						error.name = 'NotAllowedError';
+						throw error;
+					},
+				},
+			}),
+		).rejects.toBeInstanceOf(CameraPermissionError);
+
+		expect(states).toEqual(['requesting', 'stopped']);
+	});
+
 	it('refuses an insecure context before asking for permission', async () => {
 		// No point triggering a prompt that cannot succeed.
 		await expect(
@@ -198,6 +279,34 @@ describe('startCameraScan constraints', () => {
 		expect(video.resizeMode).toBe('none');
 		expect(video.facingMode).toBe('environment');
 		expect(video.advanced).toEqual([{ focusMode: 'continuous' }]);
+	});
+
+	it('asks for one exact camera when a deviceId is given', async () => {
+		// The point of listCameras is letting somebody pick the back camera on a
+		// phone that reports three. An ideal deviceId would let the engine hand back
+		// whichever camera it preferred instead, and nothing would say so.
+		const asked: MediaStreamConstraints[] = [];
+		const handle = await startCameraScan({
+			video: fakeVideo(),
+			onResult: () => undefined,
+			deviceId: 'back-camera',
+			deps: {
+				isSecureContext: true,
+				getUserMedia: async (constraints) => {
+					asked.push(constraints);
+					return fakeStream([fakeTrack()]);
+				},
+				requestFrame: () => 1,
+				cancelFrame: () => undefined,
+				createCanvas: blankCanvas(),
+			},
+		});
+		handle.stop();
+
+		const video = asked[0]?.video as Record<string, unknown>;
+		expect(video.deviceId).toEqual({ exact: 'back-camera' });
+		expect(video.facingMode).toBeUndefined();
+		expect(video.width).toEqual({ ideal: 1920 });
 	});
 
 	it('retries once, relaxed, before calling it a constraints failure', async () => {
@@ -274,6 +383,32 @@ describe('startCameraScan constraints', () => {
 			width: 640,
 			height: 480,
 		});
+	});
+
+	it('goes live without settings where the track cannot describe itself', async () => {
+		// getSettings is missing on some older engines, where calling it would throw
+		// a TypeError the instant the camera came up.
+		const bare = { stop: () => undefined } as unknown as MediaStreamTrack;
+		const statuses: Array<{ state: string; settings?: MediaTrackSettings }> = [];
+
+		const handle = await startCameraScan({
+			video: fakeVideo(),
+			onResult: () => undefined,
+			onStatus: (status) =>
+				statuses.push(status as { state: string; settings?: MediaTrackSettings }),
+			deps: {
+				isSecureContext: true,
+				getUserMedia: async () => fakeStream([bare]),
+				requestFrame: () => 1,
+				cancelFrame: () => undefined,
+				createCanvas: blankCanvas(),
+			},
+		});
+		handle.stop();
+
+		const live = statuses.find((status) => status.state === 'live');
+		expect(live).toBeDefined();
+		expect(live?.settings).toBeUndefined();
 	});
 });
 
@@ -392,6 +527,92 @@ describe('startCameraScan lifecycle', () => {
 		hide();
 		expect(track.stopped).toBe(true);
 		expect(handle.stopped).toBe(true);
+	});
+
+	it('wires itself to the page visibility event when no listener is injected', async () => {
+		// The path a consumer gets, since nobody injects this. Coming back to the
+		// tab fires the same event as leaving it, so a listener that stopped on
+		// every change would kill the scan the moment it was looked at.
+		const doc = fakeDocument();
+		vi.stubGlobal('document', doc);
+		const { track, deps } = harness(blankCanvas());
+
+		const handle = await startCameraScan({ video: fakeVideo(), onResult: () => undefined, deps });
+		expect(doc.listeners).toBe(1);
+
+		doc.fire();
+		expect(track.stopped).toBe(false);
+
+		doc.visibilityState = 'hidden';
+		doc.fire();
+		expect(track.stopped).toBe(true);
+		expect(handle.stopped).toBe(true);
+
+		// And the listener goes with it, rather than outliving the scan on a page
+		// that opens the camera more than once.
+		expect(doc.listeners).toBe(0);
+	});
+
+	it('rides out the first frames, before the video has dimensions', async () => {
+		// play() resolves before the first frame arrives, so videoWidth is 0 for a
+		// beat. Letting that end the scan would break the camera on exactly the
+		// devices that take longest to hand a frame over.
+		const image = renderQrImageData(encodeQr(PAYLOAD, { ecLevel: 'M' }), { scale: 4 });
+		const { deps, tick } = harness(scanningCanvas(image));
+		const onResult = vi.fn();
+		const video = { srcObject: null, videoWidth: 0, videoHeight: 0, play: async () => undefined };
+
+		const handle = await startCameraScan({ video, onResult, deps });
+		tick();
+		expect(onResult).not.toHaveBeenCalled();
+
+		video.videoWidth = 200;
+		video.videoHeight = 200;
+		tick();
+		handle.stop();
+
+		expect(onResult).toHaveBeenCalled();
+	});
+
+	it('keeps scanning when the browser refuses to autoplay the preview', async () => {
+		// Autoplay refusal leaves the stream live and the track running, and the
+		// caller's markup carries `playsinline muted`. Failing here would turn a
+		// cosmetic refusal into no scan at all.
+		const image = renderQrImageData(encodeQr(PAYLOAD, { ecLevel: 'M' }), { scale: 4 });
+		const { deps, tick } = harness(scanningCanvas(image));
+		const onResult = vi.fn();
+		const video: VideoLike = {
+			srcObject: null,
+			videoWidth: 200,
+			videoHeight: 200,
+			play: async () => {
+				const error = new Error('NotAllowedError');
+				error.name = 'NotAllowedError';
+				throw error;
+			},
+		};
+
+		const handle = await startCameraScan({ video, onResult, deps });
+		tick();
+		handle.stop();
+
+		expect(onResult).toHaveBeenCalled();
+	});
+
+	it('ignores a frame that was already scheduled when stop ran', async () => {
+		// stop cancels the pending frame, but the callback can already be in flight.
+		// Without the guard it grabs another frame off a camera that is meant to be
+		// off, and re-arms the loop behind stop's back.
+		const image = renderQrImageData(encodeQr(PAYLOAD, { ecLevel: 'M' }), { scale: 4 });
+		const { deps, tick } = harness(scanningCanvas(image));
+		const onResult = vi.fn();
+
+		const handle = await startCameraScan({ video: fakeVideo(), onResult, deps });
+		handle.stop();
+		tick();
+		tick();
+
+		expect(onResult).not.toHaveBeenCalled();
 	});
 
 	it('does not report frames that contain nothing', async () => {
@@ -588,6 +809,11 @@ describe('startCameraScan lifecycle', () => {
 		expect(second.stopped).toBe(false);
 		// And it does not leave its own dead stream attached to the element.
 		expect(stalling.srcObject).toBe(null);
+
+		// Its stop is inert too, so a caller that stores the loser and calls stop on
+		// it cannot take the winner's camera down instead.
+		superseded.stop();
+		expect(second.stopped).toBe(false);
 
 		live.stop();
 		expect(second.stopped).toBe(true);
@@ -819,6 +1045,108 @@ describe('startCameraScan pacing', () => {
 	});
 });
 
+describe('startCameraScan without injected dependencies', () => {
+	it("opens the camera through the page's own mediaDevices", async () => {
+		// Every other test here injects getUserMedia. A consumer injects nothing, so
+		// this is the only cover on the path they actually take.
+		const track = fakeTrack();
+		const asked: MediaStreamConstraints[] = [];
+		vi.stubGlobal('isSecureContext', true);
+		vi.stubGlobal('navigator', {
+			mediaDevices: {
+				getUserMedia: async (constraints: MediaStreamConstraints) => {
+					asked.push(constraints);
+					return fakeStream([track]);
+				},
+			},
+		});
+
+		const handle = await startCameraScan({
+			video: fakeVideo(),
+			onResult: () => undefined,
+			deps: {
+				requestFrame: () => 1,
+				cancelFrame: () => undefined,
+				createCanvas: blankCanvas(),
+			},
+		});
+		handle.stop();
+
+		expect(asked).toHaveLength(1);
+		expect(track.stopped).toBe(true);
+	});
+
+	it("schedules on the page's own animation frames, and cancels the one it left", async () => {
+		// The production path: no deps at all. The cancel is the point. A handle
+		// left uncancelled is a pump that runs once more against a camera that has
+		// already been stopped.
+		const track = fakeTrack();
+		const pumps: Array<() => void> = [];
+		const cancelled: number[] = [];
+		vi.stubGlobal('isSecureContext', true);
+		vi.stubGlobal('navigator', {
+			mediaDevices: { getUserMedia: async () => fakeStream([track]) },
+		});
+		vi.stubGlobal('requestAnimationFrame', (callback: () => void) => {
+			pumps.push(callback);
+			return pumps.length;
+		});
+		vi.stubGlobal('cancelAnimationFrame', (id: number) => {
+			cancelled.push(id);
+		});
+
+		const handle = await startCameraScan({ video: fakeVideo(), onResult: () => undefined });
+		expect(pumps).toHaveLength(1);
+
+		handle.stop();
+		expect(cancelled).toEqual([1]);
+		expect(track.stopped).toBe(true);
+	});
+
+	it('says so plainly when the browser has no camera API at all', async () => {
+		// A secure context on a browser too old for mediaDevices. The guard is here
+		// as well as in isCameraAvailable, because a caller may not have asked.
+		vi.stubGlobal('isSecureContext', true);
+		vi.stubGlobal('navigator', {});
+
+		await expect(
+			startCameraScan({ video: fakeVideo(), onResult: () => undefined }),
+		).rejects.toMatchObject({ code: 'camera/unavailable', reason: 'no-api' });
+	});
+
+	it('drives the loop on a timer where there is no requestAnimationFrame', async () => {
+		// A worker has none, and neither does a page that starts a scan before its
+		// first paint. Real timers here, because the fallback and the default clock
+		// are the things under test. Stop then has to cancel the pending timer: a
+		// loop still grabbing frames after stop is the leak this file exists for.
+		const image = renderQrImageData(encodeQr(PAYLOAD, { ecLevel: 'M' }), { scale: 4 });
+		const track = fakeTrack();
+		const onResult = vi.fn();
+
+		const handle = await startCameraScan({
+			video: fakeVideo(),
+			onResult,
+			deps: {
+				isSecureContext: true,
+				getUserMedia: async () => fakeStream([track]),
+				createCanvas: scanningCanvas(image),
+			},
+		});
+
+		for (let i = 0; i < 50 && onResult.mock.calls.length === 0; i += 1) {
+			await new Promise((resolve) => setTimeout(resolve, 10));
+		}
+		handle.stop();
+		const decoded = onResult.mock.calls.length;
+
+		expect(decoded).toBeGreaterThan(0);
+		expect(track.stopped).toBe(true);
+
+		await new Promise((resolve) => setTimeout(resolve, 60));
+		expect(onResult.mock.calls.length).toBe(decoded);
+	});
+});
+
 describe('listCameras', () => {
 	it('returns only video inputs', async () => {
 		const devices = await listCameras({
@@ -834,6 +1162,20 @@ describe('listCameras', () => {
 			{ deviceId: 'a', label: 'Back' },
 			{ deviceId: 'c', label: 'Front' },
 		]);
+	});
+
+	it("enumerates through the page's own mediaDevices when nothing is injected", async () => {
+		vi.stubGlobal('navigator', {
+			mediaDevices: {
+				enumerateDevices: async () =>
+					[
+						{ kind: 'videoinput', deviceId: 'a', label: 'Back' },
+						{ kind: 'audiooutput', deviceId: 'b', label: 'Speaker' },
+					] as MediaDeviceInfo[],
+			},
+		});
+
+		expect(await listCameras()).toEqual([{ deviceId: 'a', label: 'Back' }]);
 	});
 
 	it('returns nothing when the API is absent rather than throwing', async () => {

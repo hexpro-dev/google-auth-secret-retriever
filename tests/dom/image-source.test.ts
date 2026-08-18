@@ -1,10 +1,11 @@
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
 	type CanvasContextLike,
 	type CanvasLike,
 	MAX_CAMERA_PIXELS,
 	imageDataFromBlob,
 	imageDataFromClipboard,
+	imageDataFromFile,
 	imageDataFromVideo,
 	releaseVideoCanvas,
 } from '../../src/dom/image-source.js';
@@ -256,6 +257,27 @@ describe('imageDataFromBlob', () => {
 	});
 });
 
+describe('imageDataFromFile', () => {
+	it('decodes a chosen file the same way as a pasted one', async () => {
+		const file = { type: 'image/png', size: 10, name: 'export.png' } as unknown as File;
+
+		const result = await imageDataFromFile(file, {
+			createImageBitmap: bitmap(50, 40),
+			createCanvas: recorder().create,
+		});
+
+		expect([result.width, result.height]).toEqual([50, 40]);
+	});
+
+	it('rejects an SVG chosen from the file dialog', async () => {
+		// `accept` on a file input is a hint rather than a rule, so the refusal has
+		// to live here as well as on the paste path.
+		const file = { type: 'image/svg+xml', size: 10, name: 'code.svg' } as unknown as File;
+
+		await expect(imageDataFromFile(file)).rejects.toBeInstanceOf(ImageDecodeError);
+	});
+});
+
 describe('imageDataFromClipboard', () => {
 	const deps = {
 		createImageBitmap: (async () => ({
@@ -289,6 +311,19 @@ describe('imageDataFromClipboard', () => {
 		// People paste text into this too.
 		expect(await imageDataFromClipboard({ clipboardData: { files: [] } }, deps)).toBeNull();
 		expect(await imageDataFromClipboard({ clipboardData: null }, deps)).toBeNull();
+	});
+
+	it('ignores an item that hands back no file', async () => {
+		// Browsers do this: an item can advertise a type and then produce nothing.
+		const event = {
+			clipboardData: {
+				items: [
+					{ kind: 'file', type: 'image/png', getAsFile: () => null },
+				] as unknown as ArrayLike<DataTransferItem>,
+			},
+		};
+
+		expect(await imageDataFromClipboard(event, deps)).toBeNull();
 	});
 
 	it('ignores non-image files', async () => {
@@ -404,8 +439,158 @@ describe('imageDataFromVideo', () => {
 		expect(record.options[0]?.willReadFrequently).toBe(true);
 	});
 
+	it('rejects a frame when the canvas gives back no 2d context', () => {
+		// A page that has run out of canvas memory hands back null, and the frame
+		// loop has to raise the library's error rather than a TypeError.
+		releaseVideoCanvas();
+		const canvas: CanvasLike = { width: 0, height: 0, getContext: () => null };
+
+		expect(() =>
+			imageDataFromVideo({ videoWidth: 640, videoHeight: 480 }, { createCanvas: () => canvas }),
+		).toThrow(ImageDecodeError);
+	});
+
 	it('rejects a video that has no dimensions yet', () => {
 		// Normal for the first frames after play() resolves.
 		expect(() => imageDataFromVideo({ videoWidth: 0, videoHeight: 0 })).toThrow(ImageDecodeError);
+	});
+});
+
+describe('default browser wiring', () => {
+	// Every other suite in this file injects fakes. These are the defaults, which
+	// is what a consumer who passes no deps runs, and nothing else covers them.
+
+	afterEach(() => {
+		vi.unstubAllGlobals();
+		vi.restoreAllMocks();
+		releaseVideoCanvas();
+	});
+
+	function stubContext(): CanvasContextLike {
+		return {
+			drawImage: () => undefined,
+			getImageData: (_x: number, _y: number, width: number, height: number): ImageDataLike => ({
+				data: new Uint8ClampedArray(width * height * 4),
+				width,
+				height,
+			}),
+		};
+	}
+
+	/** Stand in for the page's OffscreenCanvas, recording the sizes asked for. */
+	function stubOffscreenCanvas(sizes: Array<[number, number]>): void {
+		vi.stubGlobal(
+			'OffscreenCanvas',
+			class {
+				width: number;
+				height: number;
+
+				constructor(width: number, height: number) {
+					sizes.push([width, height]);
+					this.width = width;
+					this.height = height;
+				}
+
+				getContext(): CanvasContextLike {
+					return stubContext();
+				}
+			},
+		);
+	}
+
+	/** An image element that settles on the next microtask. */
+	function stubImage(options: { fails: boolean }): unknown {
+		return class {
+			width = 30;
+			height = 20;
+			onload: (() => void) | null = null;
+			onerror: (() => void) | null = null;
+
+			set src(_value: string) {
+				queueMicrotask(() => {
+					if (options.fails) {
+						this.onerror?.();
+					} else {
+						this.onload?.();
+					}
+				});
+			}
+		};
+	}
+
+	it('draws on an OffscreenCanvas where the page has one', () => {
+		releaseVideoCanvas();
+		const sizes: Array<[number, number]> = [];
+		stubOffscreenCanvas(sizes);
+
+		const result = imageDataFromVideo({ videoWidth: 1280, videoHeight: 720 });
+
+		expect(sizes).toEqual([[1280, 720]]);
+		expect([result.width, result.height]).toEqual([1280, 720]);
+	});
+
+	it('falls back to a canvas element, at the size of the frame', () => {
+		// A canvas element is 300 by 150 until something says otherwise, and a frame
+		// drawn on one at that size arrives as a corner of itself.
+		releaseVideoCanvas();
+		const tags: string[] = [];
+		const created: CanvasLike[] = [];
+		vi.stubGlobal('document', {
+			createElement: (tag: string) => {
+				tags.push(tag);
+				const canvas: CanvasLike = { width: 0, height: 0, getContext: () => stubContext() };
+				created.push(canvas);
+				return canvas;
+			},
+		});
+
+		imageDataFromVideo({ videoWidth: 800, videoHeight: 600 });
+
+		expect(tags).toEqual(['canvas']);
+		expect([created[0]?.width, created[0]?.height]).toEqual([800, 600]);
+	});
+
+	it('raises ImageDecodeError where there is no canvas at all', () => {
+		// A worker without OffscreenCanvas, or a server render. The library's own
+		// error, because that is the one a caller is catching.
+		releaseVideoCanvas();
+
+		expect(() => imageDataFromVideo({ videoWidth: 100, videoHeight: 100 })).toThrow(
+			ImageDecodeError,
+		);
+	});
+
+	it("decodes a blob through the page's own createImageBitmap", async () => {
+		stubOffscreenCanvas([]);
+		vi.stubGlobal('createImageBitmap', async () => ({ width: 64, height: 48 }));
+
+		const result = await imageDataFromBlob(fakeBlob());
+
+		expect([result.width, result.height]).toEqual([64, 48]);
+	});
+
+	it('loads through an image element where createImageBitmap is missing', async () => {
+		// Older Safari. The revoke is the part worth pinning: without it the blob
+		// stays alive for the life of the document, once per pasted screenshot.
+		vi.spyOn(URL, 'createObjectURL').mockReturnValue('blob:stub');
+		const revoke = vi.spyOn(URL, 'revokeObjectURL').mockImplementation(() => undefined);
+		vi.stubGlobal('Image', stubImage({ fails: false }));
+
+		const result = await imageDataFromBlob(fakeBlob(), { createCanvas: recorder().create });
+
+		expect([result.width, result.height]).toEqual([30, 20]);
+		expect(revoke).toHaveBeenCalledWith('blob:stub');
+	});
+
+	it('revokes the object URL when the image will not load either', async () => {
+		vi.spyOn(URL, 'createObjectURL').mockReturnValue('blob:stub');
+		const revoke = vi.spyOn(URL, 'revokeObjectURL').mockImplementation(() => undefined);
+		vi.stubGlobal('Image', stubImage({ fails: true }));
+
+		const failure = imageDataFromBlob(fakeBlob('image/heic'));
+
+		await expect(failure).rejects.toBeInstanceOf(ImageDecodeError);
+		await expect(failure).rejects.toMatchObject({ mime: 'image/heic' });
+		expect(revoke).toHaveBeenCalledWith('blob:stub');
 	});
 });

@@ -53,6 +53,9 @@ function decodeBytes(bytes: Uint8Array, eci: number | null): string {
 const ECI_LABELS: ReadonlyMap<number, string> = new Map([
 	[0, 'iso-8859-1'],
 	[1, 'iso-8859-1'],
+	// ECI 000002 is cp437, left out on purpose: no runtime has a TextDecoder
+	// label for it, so listing it would only change the wording of the same
+	// refusal.
 	[3, 'iso-8859-1'],
 	[4, 'iso-8859-2'],
 	[5, 'iso-8859-3'],
@@ -62,6 +65,7 @@ const ECI_LABELS: ReadonlyMap<number, string> = new Map([
 	[9, 'iso-8859-7'],
 	[10, 'iso-8859-8'],
 	[11, 'iso-8859-9'],
+	[12, 'iso-8859-10'],
 	[13, 'iso-8859-11'],
 	[15, 'iso-8859-13'],
 	[16, 'iso-8859-14'],

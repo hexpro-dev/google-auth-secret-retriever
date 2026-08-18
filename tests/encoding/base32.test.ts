@@ -97,6 +97,19 @@ describe('decodeBase32', () => {
 		}
 	});
 
+	it('rejects a lookalike character from outside ASCII', () => {
+		// Secrets get copied out of documents and emails, and a Cyrillic capital
+		// A (U+0410) is drawn the same as the Latin one. It has to be caught by
+		// its code point, because there is nothing on screen to catch it by.
+		try {
+			decodeBase32('MZXW6YTB\u0410I');
+			expect.unreachable('should have thrown');
+		} catch (error) {
+			expect(error).toBeInstanceOf(Base32DecodeError);
+			expect((error as Base32DecodeError).index).toBe(8);
+		}
+	});
+
 	it('rejects a final character carrying bits that should be zero', () => {
 		// Two characters carry 10 bits, of which 8 are a byte and 2 are padding
 		// that a conforming encoder leaves zero. 'A' is 0 so 'MA' is clean;
