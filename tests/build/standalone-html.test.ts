@@ -1,3 +1,4 @@
+import { Script } from 'node:vm';
 import { beforeAll, describe, expect, it } from 'vitest';
 import { buildStandaloneHtml } from '../../scripts/build-html.js';
 
@@ -44,6 +45,39 @@ beforeAll(async () => {
 		.replace(/<style>[\s\S]*?<\/style>/, '<style></style>');
 }, 60_000);
 
+describe('the file is a program', () => {
+	// Everything else in here checks what the file does not contain. None of it
+	// notices a file that does not run at all, and one did: the build substituted
+	// the bundle in with `String.replace` and a string replacement, so a `$&` in
+	// the minified code, which arrives as soon as the minifier names a variable
+	// `$` and compares it with `&&`, inserted the `<!--SCRIPT-->` placeholder back
+	// into the middle of the script. `<!--` opens a comment in a classic script,
+	// so the rest of that line vanished and the file parsed to "Unexpected end of
+	// input". The page still rendered. Nothing worked, and every other assertion
+	// here passed.
+
+	it('parses as a classic script, which is how a browser will read it', () => {
+		// `vm.Script` compiles without running, in sloppy script mode, which is
+		// the same grammar the browser applies to an inline <script> with no type.
+		expect(() => new Script(script)).not.toThrow();
+	});
+
+	it('has no build placeholder left in it', () => {
+		// The specific failure above, named, so a regression says what happened
+		// rather than pointing at a syntax error 60,000 characters in.
+		for (const placeholder of ['<!--SCRIPT-->', '<!--STYLE-->', '<!--CSP-->']) {
+			expect(html, placeholder).not.toContain(placeholder);
+		}
+	});
+
+	it('has no HTML comment syntax anywhere in the script', () => {
+		// Legal in a classic script and never intended here. `<!--` would silently
+		// eat the rest of its line, which is exactly how the failure above hid.
+		expect(script).not.toContain('<!--');
+		expect(script).not.toContain('-->');
+	});
+});
+
 describe('the file is self-contained', () => {
 	it('has exactly one script, with no src', () => {
 		const scripts = markup.match(/<script\b[^>]*>/g) ?? [];
@@ -76,11 +110,16 @@ describe('the file is self-contained', () => {
 		// The footer says where the source lives, which is the point of a tool
 		// asking to be trusted. It is plain text, never a link, so there is
 		// nothing for the page to navigate to or fetch.
+		//
+		// The two allowed entries are XML namespace names rather than addresses.
+		// Nothing resolves them, and the SVG in this page cannot be built without
+		// them. Matched exactly rather than by prefix, so a real w3.org address
+		// beginning with one of them would still fail.
 		const urls = html.match(/https?:\/\/[^\s"'<>]+/g) ?? [];
-		const allowed = /^https?:\/\/(www\.w3\.org\/2000\/svg)/;
+		const allowed = new Set(['http://www.w3.org/2000/svg', 'http://www.w3.org/2000/xmlns/']);
 
 		for (const url of urls) {
-			expect(allowed.test(url), `unexpected URL: ${url}`).toBe(true);
+			expect(allowed.has(url), `unexpected URL: ${url}`).toBe(true);
 		}
 	});
 });
@@ -110,6 +149,28 @@ describe('the file cannot talk to a network', () => {
 		expect(script).not.toContain('new Function');
 		// A dynamic import in a file:// document would be a fetch.
 		expect(script).not.toMatch(/\bimport\s*\(/);
+	});
+
+	it('does not build markup out of strings either', () => {
+		// Every node in this app is made with createElement or createElementNS, so
+		// there is no string that turns into markup and no sanitiser to be right
+		// about. This page renders secrets, and account names that came off a QR
+		// code a stranger may have produced, which is the one setting where "we
+		// only ever pass our own constants" is not a good enough answer.
+		const sinks = [
+			'innerHTML',
+			'outerHTML',
+			'insertAdjacentHTML',
+			'document.write',
+			'DOMParser',
+			'parseFromString',
+			'createContextualFragment',
+			'setHTML',
+			'srcdoc',
+		];
+		for (const sink of sinks) {
+			expect(script, sink).not.toContain(sink);
+		}
 	});
 });
 

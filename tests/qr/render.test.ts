@@ -5,7 +5,12 @@ import { BitMatrix } from '../../src/qr/bit-matrix.js';
 import { decodeQrFromImageData } from '../../src/qr/decode/decoder.js';
 import { encodeQr } from '../../src/qr/encode/encoder.js';
 import type { QrSymbol } from '../../src/qr/encode/encoder.js';
-import { renderQrImageData, renderQrPng, renderQrSvg } from '../../src/qr/encode/render.js';
+import {
+	qrSvgGeometry,
+	renderQrImageData,
+	renderQrPng,
+	renderQrSvg,
+} from '../../src/qr/encode/render.js';
 import type { ImageDataLike } from '../../src/types.js';
 import { ALICE, CAROL, toMigrationUri } from '../helpers/build-payload.js';
 import { expectOk } from '../helpers/expect-result.js';
@@ -311,23 +316,146 @@ describe('renderQrSvg', () => {
 		expect(renderQrSvg(symbol, { scale: 1 })).toBe(renderQrSvg(symbol, { scale: 64 }));
 	});
 
-	it('interpolates a colour verbatim, so a colour has to come from the caller', () => {
-		// There is no escaping here, and the assertion is what the code does
-		// rather than what would be safer: a colour goes straight into an
-		// attribute. That is fine for the constants this package renders with,
-		// and it is the reason a colour must never be taken from user input. If
-		// anyone ever wires a colour picker to this, they will land here.
-		const symbol = symbolOf();
-		const size = symbol.moduleCount + 8;
-		const svg = renderQrSvg(symbol, { light: '#fff" onload="steal()' });
-
-		expect(svg).toContain(`<rect width="${size}" height="${size}" fill="#fff" onload="steal()"/>`);
-	});
-
 	it('renders a bare BitMatrix the same as the symbol holding it', () => {
 		const symbol = symbolOf();
 
 		expect(renderQrSvg(symbol.matrix)).toBe(renderQrSvg(symbol));
+	});
+
+	it('agrees with the geometry the offline app draws from', () => {
+		// The app builds the same picture with createElementNS instead of taking
+		// this string, so these two are the same drawing reached two ways. Nothing
+		// else would notice them drifting apart: src/app has no test environment,
+		// and a wrong path there is a QR code that renders and does not scan.
+		for (const quietZone of [0, 4, 7]) {
+			const symbol = symbolOf();
+			const { size, path } = qrSvgGeometry(symbol, { quietZone });
+			const svg = renderQrSvg(symbol, { quietZone });
+
+			expect(svg).toContain(`viewBox="0 0 ${size} ${size}"`);
+			expect(svg).toContain(`<path d="${path}"`);
+		}
+	});
+});
+
+/* ── Colours reaching an attribute ────────────────────────────────────────── */
+
+/**
+ * The renderer writes a colour into a `fill` attribute and the README shows its
+ * output being assigned to `innerHTML`, so a colour is the one caller-supplied
+ * string that reaches markup. These are the tests that say it cannot.
+ *
+ * The payloads are event handlers rather than `<script>` tags on purpose. A
+ * `<script>` inserted through `innerHTML` never runs, because fragment parsing
+ * marks it as already started, so a test written with one passes against
+ * vulnerable code and proves nothing.
+ */
+describe('renderQrSvg colours', () => {
+	it('refuses a colour that would break out of the attribute, rather than writing it', () => {
+		// This test used to assert the opposite. Its comment said a colour goes
+		// straight into an attribute, that this is why a colour must never come
+		// from user input, and that anyone who wired a colour picker to it would
+		// land here. Somebody would have. The payload is kept exactly as it was,
+		// so the case stays pinned and only the expectation moved.
+		const symbol = symbolOf();
+
+		expect(() => renderQrSvg(symbol, { light: '#fff" onload="steal()' })).toThrow(TypeError);
+	});
+
+	it('names the option it refused and never quotes the value back', () => {
+		// A rejected colour is attacker-controlled text. An error message is
+		// printed, logged and pasted into bug reports, so it must not become a
+		// second route for that string into a page.
+		const symbol = symbolOf();
+
+		expect(() => renderQrSvg(symbol, { dark: '#fff" onload="steal()' })).toThrow(/options\.dark/);
+		expect(() => renderQrSvg(symbol, { dark: '#fff" onload="steal()' })).not.toThrow(/steal/);
+		expect(() => renderQrSvg(symbol, { light: 'nonsense' })).toThrow(/options\.light/);
+	});
+
+	it.each([
+		['#000', 'shortest hex'],
+		['#0b76d9', 'six-digit hex'],
+		['#0b76d9ff', 'hex with alpha'],
+		['#0B76D9', 'uppercase hex'],
+		['transparent', 'keyword'],
+		['currentColor', 'keyword with capitals'],
+		['none', 'the no-paint keyword'],
+		['rgba(11, 118, 217, 0.5)', 'the legacy comma form'],
+		['rgb(0 0 0 / 50%)', 'the modern space form'],
+		['hsl(200deg 50% 50%)', 'an angle unit'],
+		['oklch(0.7 0.1 200)', 'a CSS Color 4 function'],
+		['color(display-p3 0.48 0.39 0.96)', 'a colour space'],
+	])('accepts %s (%s) and writes it unchanged', (colour) => {
+		const svg = renderQrSvg(symbolOf(), { dark: colour });
+
+		expect(svg).toContain(`fill="${colour}"`);
+	});
+
+	it.each([
+		['url(#hijack)', 'a paint server reference, which is a way out of the document'],
+		['url(https://example.invalid/a.svg#p)', 'and so is an external one'],
+		['var(--brand)', 'needs a custom property this renderer cannot see'],
+		['color-mix(in srgb, red, blue)', 'nests, which the character set rules out'],
+		['black', 'a named colour, refused so the accepted set stays small'],
+		['rgb(0,0,0);fill:url(#a)', 'a second declaration smuggled in'],
+	])('refuses %s: %s', (colour) => {
+		expect(() => renderQrSvg(symbolOf(), { light: colour })).toThrow(TypeError);
+	});
+
+	it('refuses anything outside printable ASCII, and anything overlong', () => {
+		// Apart from tab, line feed and carriage return, a control character has no
+		// legal spelling inside an XML attribute value, escaped or not, so escaping
+		// cannot rescue a consumer who parses the output as XML rather than as
+		// HTML. The gate rejects all of them, those three included. A bidi override
+		// is a smaller hazard of the same kind, in a value that ends up in logs. The Kelvin sign is here
+		// for the case that is not reachable yet: `toLowerCase` is Unicode-aware and
+		// maps U+212A to `k`, so a keyword containing a `k` could be spelled with a
+		// character CSS has never heard of. None of the three keywords contains one
+		// today, and this gate is what keeps that from mattering if a fourth is
+		// added.
+		const symbol = symbolOf();
+
+		expect(() => renderQrSvg(symbol, { dark: '#000000\u0000' })).toThrow(TypeError);
+		expect(() => renderQrSvg(symbol, { dark: 'transparent\u202e' })).toThrow(TypeError);
+		expect(() => renderQrSvg(symbol, { dark: 'blac\u212a' })).toThrow(TypeError);
+		expect(() => renderQrSvg(symbol, { dark: `#${'0'.repeat(200)}` })).toThrow(TypeError);
+	});
+
+	it('says something specific about an empty string, which is the likely accident', () => {
+		// `getPropertyValue` answers with an empty string for a custom property that
+		// does not exist, so this is what a themed caller gets the first time they
+		// typo a variable name. Sending them to a list of colour syntaxes for a
+		// value they never passed would be the wrong answer.
+		const symbol = symbolOf();
+
+		expect(() => renderQrSvg(symbol, { light: '' })).toThrow(TypeError);
+		expect(() => renderQrSvg(symbol, { light: '' })).toThrow(/options\.light is empty/);
+		expect(() => renderQrSvg(symbol, { light: '   ' })).toThrow(/is empty/);
+	});
+
+	it('trims, because a custom property comes back with its whitespace', () => {
+		const svg = renderQrSvg(symbolOf(), { dark: ' #0b76d9 ' });
+
+		expect(svg).toContain('fill="#0b76d9"');
+	});
+
+	it('reads the value exactly once, so a changing toString cannot slip past', () => {
+		// Check one string and interpolate another and the check is decoration.
+		// An object whose `toString` answers differently on the second call is the
+		// whole of the exploit, and it costs nothing to be immune to it.
+		let reads = 0;
+		const shifty = {
+			toString() {
+				reads += 1;
+				return reads === 1 ? '#000000' : '#000" onload="steal()';
+			},
+		};
+		const svg = renderQrSvg(symbolOf(), { dark: shifty as unknown as string });
+
+		expect(reads).toBe(1);
+		expect(svg).toContain('fill="#000000"');
+		expect(svg).not.toContain('steal');
 	});
 });
 
@@ -718,5 +846,68 @@ describe('render options at their edges', () => {
 		}
 
 		expect(sampleModules(image, modules, 1, 0).toString()).toBe(cropped.toString());
+	});
+
+	it('treats a quiet zone that arrived as a string as the number it spells', () => {
+		// `quietZone` is added to a module coordinate with `+`, and `+`
+		// concatenates when either side is a string. Before the coercion this
+		// produced a correctly sized viewBox, because `* 2` coerces, around a path
+		// drawn at 010 and 210: a QR code that looks right and cannot be scanned.
+		// A string is what a value looks like coming out of JSON or a form field.
+		const symbol = symbolOf();
+		const loose = { quietZone: '10' } as unknown as { quietZone: number };
+
+		expect(renderQrSvg(symbol, loose)).toBe(renderQrSvg(symbol, { quietZone: 10 }));
+		expect(renderQrPng(symbol, loose)).toEqual(renderQrPng(symbol, { quietZone: 10 }));
+		expect(renderQrImageData(symbol, loose)).toEqual(renderQrImageData(symbol, { quietZone: 10 }));
+	});
+
+	it('keeps a hostile quiet zone out of the path attribute', () => {
+		// The same defect as the colour one, in the other attribute. An event
+		// handler rather than a script tag, because a script inserted through
+		// innerHTML never runs and would pass against vulnerable code.
+		const symbol = symbolOf();
+		const hostile = {
+			quietZone: '0"><animate onbegin="steal()" attributeName="fill" dur="1s"',
+		} as unknown as { quietZone: number };
+		const svg = renderQrSvg(symbol, hostile);
+
+		expect(svg).not.toContain('<animate');
+		expect(svg).not.toContain('steal');
+		expect(svg.match(/<[a-z]+/g)).toEqual(['<svg', '<rect', '<path']);
+	});
+
+	it('falls back to the defaults when a number cannot be made of the option', () => {
+		const symbol = symbolOf();
+		const unusable = { quietZone: 'wide', scale: 'big' } as unknown as {
+			quietZone: number;
+			scale: number;
+		};
+
+		expect(renderQrSvg(symbol, unusable)).toBe(renderQrSvg(symbol));
+		expect(renderQrImageData(symbol, unusable)).toEqual(renderQrImageData(symbol));
+		expect(renderQrPng(symbol, unusable)).toEqual(renderQrPng(symbol));
+		// Fractional module counts are meaningless on a module grid, and the PNG
+		// renderer never handled them: it indexes the matrix by the result, so a
+		// half module of border returned a blank code.
+		expect(renderQrSvg(symbol, { quietZone: 4.7 })).toBe(renderQrSvg(symbol, { quietZone: 4 }));
+		expect(renderQrImageData(symbol, { scale: 0 }).width).toBe(
+			renderQrImageData(symbol, { scale: 1 }).width,
+		);
+	});
+
+	it('keeps a forged matrix width out of the markup', () => {
+		// A caller who hands over a fake matrix is already the attacker, so this is
+		// the cheapest of the three. It costs one `Number` to close, and it is the
+		// only remaining route from a caller's string into an attribute.
+		const forged = {
+			width: '0" onload="steal()',
+			height: 0,
+			get: () => false,
+		} as unknown as BitMatrix;
+		const svg = renderQrSvg(forged);
+
+		expect(svg).not.toContain('steal');
+		expect(svg).toContain('viewBox="0 0 NaN NaN"');
 	});
 });

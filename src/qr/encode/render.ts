@@ -22,12 +22,228 @@ export interface RenderOptions {
 	 * page furniture often will not read at all.
 	 */
 	readonly quietZone?: number;
+	/**
+	 * The dark modules and the background, as SVG paints.
+	 *
+	 * Read by the SVG renderer only. `renderQrPng` and `renderQrImageData` write
+	 * black and white unconditionally and ignore both.
+	 *
+	 * Accepted: `#rgb`, `#rgba`, `#rrggbb`, `#rrggbbaa`, the keywords `none`,
+	 * `transparent` and `currentColor`, and `rgb()`, `rgba()`, `hsl()`, `hsla()`,
+	 * `hwb()`, `lab()`, `lch()`, `oklab()`, `oklch()` and `color()`. Anything
+	 * else throws a `TypeError`, named colours such as `black` included.
+	 */
 	readonly dark?: string;
 	readonly light?: string;
 }
 
 function matrixOf(symbol: QrSymbol | BitMatrix): BitMatrix {
 	return 'matrix' in symbol ? symbol.matrix : symbol;
+}
+
+/* ── Colour ───────────────────────────────────────────────────────────────── */
+
+/**
+ * What a colour is allowed to be.
+ *
+ * `renderQrSvg` writes these straight into a `fill` attribute, and the README
+ * shows its output being assigned to `innerHTML`, so this is the whole of what
+ * stands between a caller's string and the markup. The guarantee is narrow on
+ * purpose: not "CSS will like this", but "this cannot leave the attribute it is
+ * written into".
+ *
+ * Named colours are deliberately absent, and not because they are unsafe. They
+ * are not: a bare word cannot leave an attribute any more than a hex triple can.
+ * The accepted set is the thing being audited, and every entry in it costs
+ * something to keep proving, so 148 names have to earn their place and `#000000`
+ * is four characters longer than `black`. Validity is the browser's job, not
+ * this function's, which is why `rgb(0, red, 0)` gets through: it is wrong, and
+ * being wrong is not what this check is for. `url()` is absent for a different
+ * reason, and that one is about safety: a paint server reference is a way out of
+ * the document, in a tool whose whole claim is that nothing leaves it.
+ */
+const COLOUR_KEYWORDS: ReadonlySet<string> = new Set(['none', 'transparent', 'currentcolor']);
+
+/**
+ * Space through tilde, at most 128 of them, tested before anything else.
+ *
+ * Two jobs. It keeps the output well formed for a consumer parsing it as XML
+ * rather than as HTML, which escaping cannot do on its own: apart from tab, line
+ * feed and carriage return, XML has no legal spelling for a C0 control inside an
+ * attribute value, escaped or not. This rejects those three as well. And it
+ * runs before `toLowerCase`, which is Unicode-aware: U+212A KELVIN SIGN
+ * lowercases to `k`, so a keyword containing a `k` could otherwise be spelled
+ * with a character CSS has never heard of and still match. None of the three
+ * keywords contains one, which is luck rather than design, and this is what
+ * stops that mattering if a fourth is ever added.
+ *
+ * The length sits above anything the syntax below can produce, so it can never
+ * reject a real colour. It is there to bound the scan.
+ */
+const PRINTABLE_ASCII = /^[ -~]{1,128}$/;
+
+/**
+ * Hex by length, and the functional notations by shape rather than by grammar.
+ *
+ * The arguments are checked as a character set, not parsed. Parsing them would
+ * mean an argument grammar for ten functions across two syntaxes and would buy
+ * nothing: `rgb(0, red, 0)` is not dangerous, it is merely wrong, and the
+ * browser already says so. The set excludes `(` and `)`, which is what rules out
+ * nesting, and with it `var()`, `color-mix()` and anything smuggled into an
+ * argument.
+ *
+ * It cannot backtrack catastrophically either. The only quantifier that runs any
+ * distance is a bounded single character class, and the literal after it is `)`,
+ * which the class cannot match, so the engine is never left with a second way to
+ * split the input. The hex branch is three fixed-width alternatives.
+ */
+const COLOUR_SYNTAX =
+	/^(?:#(?:[0-9a-f]{3,4}|[0-9a-f]{6}|[0-9a-f]{8})|(?:rgba?|hsla?|hwb|lab|lch|oklab|oklch|color)\([0-9a-z.,%/ +-]{1,120}\))$/i;
+
+/**
+ * Defence in depth. After the check above it can never fire.
+ *
+ * It stays because it is a second, independent mechanism at a sink the README
+ * teaches people to feed to `innerHTML`, and because a regex is exactly the kind
+ * of thing somebody widens later to add a colour format. Inside a double-quoted
+ * HTML attribute only `&` and `"` have to go; all five, because this returns a
+ * string that also gets written to `.svg` files and `data:` URIs, where XML's
+ * AttValue production forbids a bare `<`. `&#39;` rather than `&apos;`, which
+ * HTML 4.01 never defined and a parser of that vintage renders literally.
+ */
+function escapeAttribute(value: string): string {
+	return value
+		.replace(/&/g, '&amp;')
+		.replace(/</g, '&lt;')
+		.replace(/>/g, '&gt;')
+		.replace(/"/g, '&quot;')
+		.replace(/'/g, '&#39;');
+}
+
+/**
+ * Resolve one colour option, or refuse to render.
+ *
+ * Coerced exactly once, and the coerced copy is what gets both checked and
+ * written. Checking one string and interpolating another is the shape most
+ * sanitiser bugs arrive in, and here it would be exploitable: an object whose
+ * `toString` answers `#000000` the first time and something else the second
+ * passes any check that reads the original again.
+ *
+ * Trimmed, because a colour that is not a literal usually comes from a custom
+ * property, and engines have never agreed on whether `getPropertyValue` hands
+ * back the whitespace around one.
+ *
+ * Refusing rather than substituting, which is the opposite of what a negative
+ * quiet zone does below, and the difference is whether a safe degradation
+ * exists. A negative quiet zone crops, which is visibly wrong. A colour has no
+ * such option: SVG 2 section 4.2 says a presentation attribute holding an
+ * invalid value is treated as though the property's initial value had been
+ * specified, and the initial value of `fill` is black. So a substituted `light`
+ * would paint a black square that no scanner reads and nothing reports, and a
+ * substituted `dark` would be invisible, because black is what it was going to
+ * be anyway.
+ *
+ * A `TypeError` rather than a `RetrieverError`, because the taxonomy is for
+ * things that happen to data and this is a caller passing the wrong constant.
+ * `attempt` rethrows anything that is not a `RetrieverError`, which is where a
+ * bug belongs. The message names the option and never the value: a rejected
+ * colour is exactly the kind of string not to hand back a second route into a
+ * page.
+ */
+function colourOption(name: 'dark' | 'light', value: string): string {
+	const colour = String(value).trim();
+	if (colour === '') {
+		// Its own sentence, because it is the likeliest way to arrive here by
+		// accident and the general message would send somebody hunting through a
+		// list of colour syntaxes for a value they never passed.
+		throw new TypeError(
+			`renderQrSvg: options.${name} is empty. A CSS custom property that does not exist ` +
+				'reads back as an empty string, so check the name, or leave the option out to get ' +
+				'the default.',
+		);
+	}
+	if (
+		!PRINTABLE_ASCII.test(colour) ||
+		!(COLOUR_KEYWORDS.has(colour.toLowerCase()) || COLOUR_SYNTAX.test(colour))
+	) {
+		throw new TypeError(
+			`renderQrSvg: options.${name} is not a colour this renderer accepts. Use a hex colour ` +
+				'such as #0b76d9, one of none, transparent and currentColor, or an rgb(), rgba(), ' +
+				'hsl(), hsla(), hwb(), lab(), lch(), oklab(), oklch() or color() value. Named ' +
+				'colours are refused, so write black as #000000, and so are var() and url().',
+		);
+	}
+	return escapeAttribute(colour);
+}
+
+/* ── Geometry ─────────────────────────────────────────────────────────────── */
+
+/**
+ * How many modules of border, as a number, whatever arrived.
+ *
+ * Not a nicety. `quietZone` is added to a module coordinate with `+`, and `+`
+ * concatenates when either side is a string, so before this a string here broke
+ * out of the `d` attribute exactly the way an unescaped colour broke out of
+ * `fill`. The quieter half of the same defect is that `'10'`, which is the shape
+ * a value takes coming out of JSON or a form field, produced a correctly sized
+ * `viewBox` around a path drawn at 010 and 210: a QR code that looks right and
+ * cannot be scanned.
+ *
+ * Coerced rather than refused, unlike a colour, because a wrong quiet zone
+ * degrades visibly. A negative one crops into the symbol, which is obviously
+ * broken at a glance, and that behaviour is pinned by a test whose reasoning is
+ * that a renderer throwing inside a render loop takes the page with it.
+ *
+ * Floor rather than truncate, so the sign does not change the direction of the
+ * rounding. `Math.trunc(-0.5)` is `-0`, which would mean a negative quiet zone
+ * quietly stopping short of cropping at all, and the sentence above would be
+ * false for exactly the values it is about.
+ */
+function moduleBorder(value: number | undefined): number {
+	const border = Math.floor(Number(value ?? 4));
+	return Number.isFinite(border) ? border : 4;
+}
+
+/** Pixels per module, on the same terms: coerced, never thrown over. */
+function pixelScale(value: number | undefined): number {
+	const scale = Math.round(Number(value ?? 4));
+	return Number.isFinite(scale) ? Math.max(1, scale) : 4;
+}
+
+/** The numbers and the one path string an SVG of this symbol is made of. */
+export interface QrSvgGeometry {
+	readonly size: number;
+	readonly path: string;
+}
+
+/**
+ * The geometry, without the markup.
+ *
+ * Exported so the offline app can build the same picture with `createElementNS`
+ * rather than assigning a string to `innerHTML`. A seam inside this package
+ * rather than API, so it is deliberately absent from `src/index.ts` and
+ * `src/qr/index.ts`.
+ */
+export function qrSvgGeometry(
+	symbol: QrSymbol | BitMatrix,
+	options: RenderOptions = {},
+): QrSvgGeometry {
+	const matrix = matrixOf(symbol);
+	const quietZone = moduleBorder(options.quietZone);
+	// `Number` because `matrix.width` reaches an attribute through `size`, and a
+	// forged matrix carrying a string width would concatenate rather than add.
+	const size = Number(matrix.width) + quietZone * 2;
+
+	let path = '';
+	for (let y = 0; y < matrix.height; y += 1) {
+		for (let x = 0; x < matrix.width; x += 1) {
+			if (matrix.get(x, y)) {
+				path += `M${x + quietZone} ${y + quietZone}h1v1h-1z`;
+			}
+		}
+	}
+
+	return { size, path };
 }
 
 /**
@@ -38,20 +254,10 @@ function matrixOf(symbol: QrSymbol | BitMatrix): BitMatrix {
  * bytes that gzip mostly recovers anyway.
  */
 export function renderQrSvg(symbol: QrSymbol | BitMatrix, options: RenderOptions = {}): string {
-	const matrix = matrixOf(symbol);
-	const quietZone = options.quietZone ?? 4;
-	const dark = options.dark ?? '#000000';
-	const light = options.light ?? '#ffffff';
-	const size = matrix.width + quietZone * 2;
-
-	let path = '';
-	for (let y = 0; y < matrix.height; y += 1) {
-		for (let x = 0; x < matrix.width; x += 1) {
-			if (matrix.get(x, y)) {
-				path += `M${x + quietZone} ${y + quietZone}h1v1h-1z`;
-			}
-		}
-	}
+	// Colours first, so a refusal costs nothing on a large symbol.
+	const light = colourOption('light', options.light ?? '#ffffff');
+	const dark = colourOption('dark', options.dark ?? '#000000');
+	const { size, path } = qrSvgGeometry(symbol, options);
 
 	return [
 		`<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${size} ${size}"`,
@@ -68,8 +274,8 @@ export function renderQrImageData(
 	options: RenderOptions = {},
 ): ImageDataLike {
 	const matrix = matrixOf(symbol);
-	const scale = Math.max(1, Math.round(options.scale ?? 4));
-	const quietZone = options.quietZone ?? 4;
+	const scale = pixelScale(options.scale);
+	const quietZone = moduleBorder(options.quietZone);
 	const modules = matrix.width + quietZone * 2;
 	const size = modules * scale;
 
@@ -153,8 +359,8 @@ function chunk(type: string, body: Uint8Array): Uint8Array {
  */
 export function renderQrPng(symbol: QrSymbol | BitMatrix, options: RenderOptions = {}): Uint8Array {
 	const matrix = matrixOf(symbol);
-	const scale = Math.max(1, Math.round(options.scale ?? 4));
-	const quietZone = options.quietZone ?? 4;
+	const scale = pixelScale(options.scale);
+	const quietZone = moduleBorder(options.quietZone);
 	const modules = matrix.width + quietZone * 2;
 	const size = modules * scale;
 

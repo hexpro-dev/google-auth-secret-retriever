@@ -125,8 +125,17 @@ describe('the binarised frame', () => {
 		// A four megapixel working image would otherwise hand a consumer a 4 MB
 		// array to turn into a 16 MB ImageData on the main thread, for a picture
 		// nobody can see the detail in.
+		//
+		// The frozen clock is what makes this deterministic, and it is not
+		// decoration. 2400 by 1800 is over the working cap, so the reduction and
+		// the polarity guess both run before the ladder does, and the budget is
+		// checked at the top of the first rung rather than after it. On a loaded
+		// machine that check can fail before any rung has run, and then there is no
+		// binarised frame to find and this fails for a reason that has nothing to
+		// do with the pixel ceiling it is testing. Seen under a parallel coverage
+		// run, roughly one time in four.
 		const wide = flat(2400, 1800, 200);
-		const binarised = collect(wide).find((frame) => frame.stage === 'binarised');
+		const binarised = collect(wide, { now: () => 0 }).find((frame) => frame.stage === 'binarised');
 
 		expect(binarised?.stage).toBe('binarised');
 		if (binarised?.stage !== 'binarised') {

@@ -8,6 +8,54 @@ corpus returns text that was not encoded, before or after.
 
 ### Fixed
 
+- **The single-file offline app did not run.** `scripts/build-html.ts`
+  substituted the bundle into the template with `String.replace` and a string
+  replacement, and a string replacement reads `$` patterns: `$&` means "the text
+  that was matched". The minifier names a variable `$` sooner or later, and the
+  first time one is compared with `&&` after it, `o!==$&&o!==X` came out of the
+  build as `o!==<!--SCRIPT-->&o!==X`. `<!--` opens a comment in a classic script,
+  so the rest of that line went with it and the whole file parsed to "Unexpected
+  end of input". The page rendered, the styles applied, and nothing worked. Every
+  other assertion in the build test passed, because they all check what the file
+  does not contain and none of them checked that it runs. The replacements are
+  functions now, which have no pattern syntax, and the build test compiles the
+  script with `node:vm` and refuses any surviving placeholder or HTML comment.
+  Confirmed fixed by driving the built file in headless Chrome: a link is read,
+  two accounts appear, and the re-import code renders and decodes back to the
+  `otpauth://` URI it was built from.
+- **A colour going straight into an SVG attribute.** `renderQrSvg` interpolated
+  `dark` and `light` verbatim, so a value containing a double quote closed the
+  attribute and could open an element after it, and the README shows that output
+  being assigned to `innerHTML`. Colours are now checked against a list of
+  accepted forms and escaped on the way in. A value that is not on the list
+  throws, rather than being substituted, because substituting is silent and so is
+  doing nothing: SVG 2 section 4.2 treats a presentation attribute holding an
+  invalid value as though the property's initial value had been specified, and
+  the initial value of `fill` is black, so a bad `light` turns the symbol into a
+  black square that no scanner reads and nothing reports, and a bad `dark` is
+  invisible because black is what it was going to be anyway. Nothing shipped
+  was exploitable, because the only caller passed no colours at all, which is the
+  reason to fix it now rather than after somebody wires a colour picker to it.
+- **A quiet zone that arrived as a string being concatenated into the path.**
+  `quietZone` is added to a module coordinate, and `+` concatenates when either
+  side is a string, so a string here landed inside the `d` attribute the same way
+  a colour landed inside `fill`. The quieter half of the same defect: `'10'`,
+  which is the shape a value takes coming out of JSON or a form field, produced a
+  correctly sized `viewBox` around a path drawn at 010 and 210, so the code
+  looked right and could not be scanned. `quietZone` and `scale` are now coerced
+  to numbers, `quietZone` in all three renderers and `scale` in the two that read
+  it, and a value no number can be made of falls back to the default. A negative
+  quiet zone still crops rather than throwing.
+  `renderQrSvg` also coerces `matrix.width`, which closes the last route from a
+  caller's string into an attribute, this one needing a forged matrix and so a
+  caller who is already the attacker. The two raster renderers do not, because
+  neither of them produces markup.
+- **The offline app assigning renderer output to `innerHTML`.** It built the
+  re-import code from a string, which contradicts the rule stated in `element()`
+  at the top of the same file. It now builds the SVG with `createElementNS`, and
+  the build test asserts the bundle contains none of the nine ways a string
+  usually becomes markup, `innerHTML` and `DOMParser` among them. The code also
+  gained an accessible name, which the string renderer has no way to emit.
 - **Photographs held at an angle.** The bottom-right alignment pattern was
   chosen by distance from a prediction that is known to be wrong: the fit
   through three finder patterns is affine, so at version 26 its guess for the
@@ -85,6 +133,28 @@ corpus returns text that was not encoded, before or after.
 
 ### Changed
 
+- **Breaking:** `renderQrSvg` accepts `#rgb`, `#rgba`, `#rrggbb` and
+  `#rrggbbaa`, the keywords `none`, `transparent` and `currentColor`, and
+  `rgb()`, `rgba()`, `hsl()`, `hsla()`, `hwb()`, `lab()`, `lch()`, `oklab()`,
+  `oklch()` and `color()` whose contents are digits, letters, dots, commas,
+  spaces, slashes, signs and percent signs. Anything else throws a `TypeError`.
+  Named colours are not accepted, so `black` becomes `#000000`, and neither are
+  `var()`, `color-mix()` and `url()`. `url()` is the reason the check has the
+  shape it does: a paint server reference is a way out of a document whose whole
+  claim is that nothing leaves it. A `TypeError` rather than a `RetrieverError`,
+  because `RetrieverErrorCode` is for things that happen to data and this is a
+  caller passing the wrong constant, which `attempt` should rethrow rather than
+  turn into a failed `Result`. The message names the option and never the value,
+  so a rejected string is not handed a second route into a page.
+- A fractional `quietZone` is floored to whole modules in all three renderers,
+  where the SVG one used to pass it through. A half-module border is legal SVG
+  and was drawn correctly, but `renderQrPng` indexed the matrix by the result and
+  returned a blank code, and `renderQrImageData` produced a canvas with
+  fractional dimensions whenever `quietZone * scale` was not whole. Consistency
+  in the direction of the renderer that cannot be wrong quietly.
+- `dark` and `light` have always been ignored by `renderQrPng` and
+  `renderQrImageData`, which write black and white unconditionally. That is now
+  written down in `RenderOptions` rather than left to be discovered.
 - **Breaking:** `DecodeFailureReason` gains `'geometry'` and loses `'no-extract'`
   and `'empty'`. `'geometry'` means the markers were found and no grid would fit
   over them, which takes the misplaced-grid case away from `'checksum'`, and

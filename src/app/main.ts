@@ -11,7 +11,8 @@ import { parseMigrationUri } from '../migration/parse-uri.js';
 import { generateHotp } from '../otp/hotp.js';
 import { generateTotp } from '../otp/totp.js';
 import { encodeQr } from '../qr/encode/encoder.js';
-import { renderQrSvg } from '../qr/encode/render.js';
+import type { QrSymbol } from '../qr/encode/encoder.js';
+import { qrSvgGeometry } from '../qr/encode/render.js';
 import type { OtpAccount } from '../types.js';
 import { AppStore, batchSummary, groupCode } from './state.js';
 import type { AppState } from './state.js';
@@ -40,11 +41,55 @@ function element<K extends keyof HTMLElementTagNameMap>(
 		node.className = className;
 	}
 	if (text !== undefined) {
-		// textContent, never innerHTML. Account names come from a QR code a
+		// textContent, never markup. Account names come from a QR code a
 		// stranger may have produced, and this page renders secrets.
 		node.textContent = text;
 	}
 	return node;
+}
+
+const SVG_NS = 'http://www.w3.org/2000/svg';
+
+/**
+ * The re-import code as elements rather than as a string.
+ *
+ * `renderQrSvg` returns markup and the library has to keep doing that, but this
+ * page renders secrets, so it builds the same picture with `createElementNS` and
+ * `setAttribute`, neither of which parses anything. Same rule as `element()`
+ * above: nothing here becomes markup by being a string.
+ *
+ * `xmlns` is set even though a namespaced element does not need it, so that the
+ * serialised form is still a standalone SVG file. Someone who copies this
+ * element out of the page, or drags it onto the desktop, gets something that
+ * opens.
+ *
+ * The name goes in an `aria-label` rather than an SVG `<title>` because a
+ * `<title>` also renders as a hover tooltip over the code, and because
+ * `aria-label` on `role="img"` is the accessible name every engine agrees on.
+ * It names the account, since a page with eight of these otherwise reads as
+ * eight identically labelled images.
+ */
+function qrElement(symbol: QrSymbol, name: string): SVGSVGElement {
+	const { size, path } = qrSvgGeometry(symbol, { quietZone: 4 });
+
+	const svg = document.createElementNS(SVG_NS, 'svg');
+	svg.setAttributeNS('http://www.w3.org/2000/xmlns/', 'xmlns', SVG_NS);
+	svg.setAttribute('viewBox', `0 0 ${size} ${size}`);
+	svg.setAttribute('shape-rendering', 'crispEdges');
+	svg.setAttribute('role', 'img');
+	svg.setAttribute('aria-label', `QR code for ${name}`);
+
+	const background = document.createElementNS(SVG_NS, 'rect');
+	background.setAttribute('width', String(size));
+	background.setAttribute('height', String(size));
+	background.setAttribute('fill', '#ffffff');
+
+	const modules = document.createElementNS(SVG_NS, 'path');
+	modules.setAttribute('d', path);
+	modules.setAttribute('fill', '#000000');
+
+	svg.append(background, modules);
+	return svg;
 }
 
 function byId<T extends HTMLElement>(id: string): T {
@@ -230,7 +275,12 @@ function accountCard(account: OtpAccount, index: number, revealed: boolean): HTM
 		const holder = element('div', 'qr-holder');
 		// Inline SVG: crisp at any density, printable, and no blob URL, which
 		// matters for a page that promises nothing leaves the tab.
-		holder.innerHTML = renderQrSvg(encodeQr(account.uri, { ecLevel: 'M' }), { quietZone: 4 });
+		holder.append(
+			qrElement(
+				encodeQr(account.uri, { ecLevel: 'M' }),
+				account.displayIssuer || account.accountName || 'this account',
+			),
+		);
 		qrWrap.append(holder);
 		qrWrap.append(
 			element(

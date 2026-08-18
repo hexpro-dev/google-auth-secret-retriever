@@ -112,6 +112,16 @@ element.innerHTML = renderQrSvg(encodeQr(account.uri));
 Inline SVG, so it is crisp at any pixel density, prints, and needs no canvas or
 blob URL. `renderQrPng` and `renderQrImageData` are there when you need pixels.
 
+The `dark` and `light` options take a hex colour, one of `none`, `transparent`
+and `currentColor`, or an `rgb()`, `rgba()`, `hsl()`, `hsla()`, `hwb()`, `lab()`,
+`lch()`, `oklab()`, `oklch()` or `color()` value. Anything else throws a
+`TypeError`, named colours and `var()` and `url()` included, and what is accepted
+is escaped on the way into the attribute. So a colour read off a stylesheet or
+taken from a colour picker cannot turn the output into markup of its own. The
+offline app goes further and builds the same picture with `createElementNS`,
+because it renders secrets and would rather not have a string in that path at
+all.
+
 ### Multi-code exports
 
 Google splits a large export across several QR codes, each carrying a batch

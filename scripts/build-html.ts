@@ -67,7 +67,20 @@ export async function buildStandaloneHtml(): Promise<StandaloneBuildResult> {
 	// page still renders, unstyled and inert, which is a confusing way to find
 	// out. Reading the contents back out of the document removes the class of
 	// bug entirely.
-	const withContent = template.replace('<!--STYLE-->', style).replace('<!--SCRIPT-->', script);
+	//
+	// The replacements are functions rather than strings, and that is not a
+	// style preference. `String.replace` reads `$` patterns in a *string*
+	// replacement, so `$&` inside the bundle inserts the text that was matched.
+	// The minifier names a variable `$` sooner or later, and the moment one of
+	// them is compared with `&&` after it, `o!==$&&o!==X` becomes
+	// `o!==<!--SCRIPT-->&o!==X` in the output. That is not JavaScript, and
+	// because `<!--` opens a comment in a classic script the rest of the line
+	// disappears with it: the whole file parses to "Unexpected end of input" and
+	// the app is inert, with a page that still renders. A function replacement
+	// has no pattern syntax at all.
+	const withContent = template
+		.replace('<!--STYLE-->', () => style)
+		.replace('<!--SCRIPT-->', () => script);
 
 	const styleText = /<style>([\s\S]*?)<\/style>/.exec(withContent)?.[1];
 	const scriptText = /<script>([\s\S]*?)<\/script>/.exec(withContent)?.[1];
@@ -97,7 +110,7 @@ export async function buildStandaloneHtml(): Promise<StandaloneBuildResult> {
 
 	const html = withContent.replace(
 		'<!--CSP-->',
-		`<meta http-equiv="Content-Security-Policy" content="${csp}" />`,
+		() => `<meta http-equiv="Content-Security-Policy" content="${csp}" />`,
 	);
 
 	return {
