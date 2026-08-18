@@ -40,7 +40,15 @@ and documented. Test it by serving the file over http instead:
    single-file app and its SHA-256 to a GitHub release so a downloader can check
    what they got.
 
-Requires an `NPM_TOKEN` secret with publish access to the `@hexpro` scope.
+Requires no secret. The workflow authenticates to npm with OIDC, against the
+trusted publisher configured on the package at npmjs.com, which names this
+repository and the workflow filename. If publishing ever fails with an
+authentication error, check that configuration first: renaming
+`.github/workflows/publish-npm.yml` or moving the repository invalidates it.
+
+The publish step is the one place here that runs `npm` rather than `pnpm`. pnpm
+gained OIDC publishing in its 11 line and this repository is pinned to pnpm 10,
+so `pnpm publish` would look for a token, find none, and fail.
 
 ## Never in a release
 

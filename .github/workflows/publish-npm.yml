@@ -4,8 +4,10 @@ name: publish-npm
 # tag. Publishes to npm and attaches the single-file offline app to a release, so
 # somebody who downloads that file can check its hash against the build log.
 #
-# Required secrets:
-#   NPM_TOKEN: an npm token with publish access to the `@hexpro` scope.
+# No secrets. Publishing is authenticated by OIDC against the trusted publisher
+# configured on the package at npmjs.com, which names this repository and this
+# filename. Renaming this file, or moving the repository, breaks publishing until
+# that configuration is updated to match, and that is the intended behaviour.
 
 on:
   push:
@@ -34,6 +36,14 @@ jobs:
           node-version: 22
           cache: pnpm
           registry-url: https://registry.npmjs.org
+
+      # Trusted publishing needs npm 11.5.1 or later, and Node 22 ships npm 10.
+      # Nothing else in this workflow uses npm; it is here because it is the only
+      # client that can do the OIDC exchange. See the publish step.
+      - name: Upgrade npm for trusted publishing
+        run: |
+          npm install -g npm@^11
+          npm --version
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
@@ -94,10 +104,25 @@ jobs:
       - name: Verify published file list
         run: pnpm pack --dry-run
 
+      # Published with the npm client rather than pnpm, which is the one place in
+      # this repository that is true. There is no token: the `id-token: write`
+      # permission above lets the runner prove to npm that it is this workflow in
+      # this repository, and npm checks that against the trusted publisher
+      # configured on the package. Nothing long lived is stored anywhere, which
+      # is the point, because npm now caps a write token at ninety days and a
+      # secret that has to be rotated four times a year is a secret that will one
+      # day be rotated badly.
+      #
+      # pnpm cannot do this yet. Its OIDC support landed in the 11 line, and this
+      # repository is pinned to pnpm 10 for everything else, so `pnpm publish`
+      # here would look for a token, find none, and fail.
+      #
+      # Provenance is not decoration on a package like this one. It is a signed
+      # statement of which commit and which workflow produced the tarball, so
+      # somebody who does not trust us can still check that what is on the
+      # registry is what is in the repository.
       - name: Publish to npm
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-        run: pnpm publish --access=public --no-git-checks --provenance
+        run: npm publish --access public --provenance
 
       - name: Attach the offline app to the release
         uses: softprops/action-gh-release@v2
