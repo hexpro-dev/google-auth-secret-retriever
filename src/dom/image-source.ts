@@ -1,4 +1,5 @@
 import { ImageDecodeError } from '../errors.js';
+import { MAX_WORK_PIXELS } from '../qr/decode/decoder.js';
 import type { ImageDataLike } from '../types.js';
 
 /**
@@ -19,12 +20,25 @@ export interface ImageDecodeDeps {
 export interface CanvasLike {
 	width: number;
 	height: number;
-	getContext(type: '2d'): CanvasContextLike | null;
+	getContext(
+		type: '2d',
+		options?: { readonly willReadFrequently?: boolean },
+	): CanvasContextLike | null;
 }
 
 export interface CanvasContextLike {
 	drawImage(source: never, x: number, y: number, width?: number, height?: number): void;
 	getImageData(x: number, y: number, width: number, height: number): ImageDataLike;
+	/**
+	 * Both set on every context this module draws through.
+	 *
+	 * Optional only so a hand-written fake need not carry them. The default in a
+	 * real browser is `'low'`, which in Chrome is a single bilinear tap per
+	 * destination pixel whatever the ratio, so a 4032 to 1600 reduction samples
+	 * 4 of every 25 source pixels and aliases the module grid.
+	 */
+	imageSmoothingEnabled?: boolean;
+	imageSmoothingQuality?: 'low' | 'medium' | 'high';
 }
 
 export interface ImageLike {
@@ -33,14 +47,21 @@ export interface ImageLike {
 }
 
 /**
- * Anything over this on the long edge is downscaled before decoding.
+ * Work ceiling for a still image, in pixels rather than in long edge.
  *
- * An iPad screenshot is 2732 pixels wide and a modern phone camera is far more.
- * QR decoding gains nothing from that resolution and pays for it linearly at
- * every stage, so the cap is a straight win. The decoder applies its own cap
- * too; this one keeps the canvas allocation down as well.
+ * The same number the decoder uses, so the two caps cannot interact: the pair of
+ * them undershooting each other by a factor of two is what made every photograph
+ * over 1400 pixels decode at 800.
  */
-const MAX_EDGE = 1600;
+const MAX_STILL_PIXELS = MAX_WORK_PIXELS;
+
+/**
+ * The most any one `drawImage` may reduce by.
+ *
+ * Halving is the ratio at which a bilinear tap and a box average agree exactly,
+ * which makes stepping correct whether or not the quality hint was honoured.
+ */
+const MAX_STEP = 2;
 
 function defaultCanvas(width: number, height: number): CanvasLike {
 	if (typeof OffscreenCanvas !== 'undefined') {
@@ -71,9 +92,89 @@ function loadViaElement(blob: Blob): Promise<ImageLike> {
 	});
 }
 
-function scaleFor(width: number, height: number): number {
-	const longest = Math.max(width, height);
-	return longest > MAX_EDGE ? MAX_EDGE / longest : 1;
+/** Target size for a source of this size, capped by area and never enlarged. */
+function targetSize(width: number, height: number, maxPixels: number): [number, number] {
+	const pixels = width * height;
+	if (pixels <= maxPixels) {
+		return [width, height];
+	}
+	const scale = Math.sqrt(maxPixels / pixels);
+	return [Math.max(1, Math.floor(width * scale)), Math.max(1, Math.floor(height * scale))];
+}
+
+function context(canvas: CanvasLike, mime: string): CanvasContextLike {
+	const found = canvas.getContext('2d');
+	if (found === null) {
+		throw new ImageDecodeError(mime);
+	}
+	found.imageSmoothingEnabled = true;
+	found.imageSmoothingQuality = 'high';
+	return found;
+}
+
+/**
+ * The sizes a reduction passes through, none of them more than 2x down.
+ *
+ * The last entry is always the target, and a reduction of 2x or less is one
+ * entry, so nothing here changes what a modest reduction does.
+ */
+function reductionSteps(
+	sourceWidth: number,
+	sourceHeight: number,
+	width: number,
+	height: number,
+): Array<readonly [number, number]> {
+	const steps: Array<readonly [number, number]> = [];
+	let currentWidth = sourceWidth;
+	let currentHeight = sourceHeight;
+
+	for (;;) {
+		const stepWidth = Math.max(width, Math.round(currentWidth / MAX_STEP));
+		const stepHeight = Math.max(height, Math.round(currentHeight / MAX_STEP));
+		if (stepWidth <= width && stepHeight <= height) {
+			steps.push([width, height]);
+			return steps;
+		}
+		steps.push([stepWidth, stepHeight]);
+		currentWidth = stepWidth;
+		currentHeight = stepHeight;
+	}
+}
+
+/**
+ * Draw a source down to a target size in steps of at most 2x.
+ *
+ * One `drawImage` from 4032 to 1600 discards most of the source whatever the
+ * quality hint says, and what it keeps is whichever pixels the destination grid
+ * happened to land on, which is how a screen-door pattern becomes stripes the
+ * binariser then has to survive. Halving repeatedly averages instead.
+ */
+function drawStepped(
+	source: ImageLike,
+	width: number,
+	height: number,
+	createCanvas: (width: number, height: number) => CanvasLike,
+	mime: string,
+): ImageDataLike {
+	let current: ImageLike = source;
+
+	const steps = reductionSteps(source.width, source.height, width, height);
+	let last: { context: CanvasContextLike; width: number; height: number } | null = null;
+
+	for (const [stepWidth, stepHeight] of steps) {
+		const canvas = createCanvas(stepWidth, stepHeight);
+		canvas.width = stepWidth;
+		canvas.height = stepHeight;
+		const ctx = context(canvas, mime);
+		ctx.drawImage(current as never, 0, 0, stepWidth, stepHeight);
+		current = canvas;
+		last = { context: ctx, width: stepWidth, height: stepHeight };
+	}
+
+	if (last === null) {
+		throw new ImageDecodeError(mime);
+	}
+	return last.context.getImageData(0, 0, last.width, last.height);
 }
 
 export async function imageDataFromBlob(
@@ -107,21 +208,8 @@ export async function imageDataFromBlob(
 		throw new ImageDecodeError(blob.type);
 	}
 
-	const scale = scaleFor(source.width, source.height);
-	const width = Math.max(1, Math.round(source.width * scale));
-	const height = Math.max(1, Math.round(source.height * scale));
-
-	const canvas = createCanvas(width, height);
-	canvas.width = width;
-	canvas.height = height;
-
-	const context = canvas.getContext('2d');
-	if (context === null) {
-		throw new ImageDecodeError(blob.type);
-	}
-
-	context.drawImage(source as never, 0, 0, width, height);
-	return context.getImageData(0, 0, width, height);
+	const [width, height] = targetSize(source.width, source.height, MAX_STILL_PIXELS);
+	return drawStepped(source, width, height, createCanvas, blob.type);
 }
 
 export async function imageDataFromFile(
@@ -174,31 +262,115 @@ export async function imageDataFromClipboard(
 	return null;
 }
 
-/** Read the current frame of a playing video, downscaled for decoding. */
+/**
+ * Work ceiling for a live camera frame.
+ *
+ * A 1080p frame is 2.07 megapixels and has to pass through untouched, because
+ * reducing it is exactly what this policy exists to stop: a 1280 by 720 stream
+ * used to arrive at the decoder as 720 by 405, where a ten-account export sits
+ * at 1.8 pixels per module, below Nyquist at every sensor size, so no better
+ * camera could help. 2.1 is that number with nothing to spare, deliberately: a
+ * 4K frame is still reduced, and reduced to 1080p rather than to 720p.
+ */
+export const MAX_CAMERA_PIXELS = 2_100_000;
+
+/**
+ * The canvases one video frame passes through, reused while the size holds.
+ *
+ * Eight fresh OffscreenCanvas allocations a second is pure garbage, and it is
+ * garbage created on the thread that also has to paint the preview. The frame
+ * size does not change while a stream is open, so the chain is built once.
+ *
+ * Almost always one canvas. A frame needs an intermediate only when the reduction
+ * is more than 2x, which the camera ceiling does not ask for below 8K: 4K is
+ * 3840 to 1932, a ratio of 1.99. See the note in `imageDataFromVideo`.
+ */
+let videoChain: {
+	readonly create: (width: number, height: number) => CanvasLike;
+	readonly sourceWidth: number;
+	readonly sourceHeight: number;
+	readonly steps: ReadonlyArray<{
+		readonly canvas: CanvasLike;
+		readonly context: CanvasContextLike;
+		readonly width: number;
+		readonly height: number;
+	}>;
+} | null = null;
+
+/**
+ * Read the current frame of a playing video, reduced for decoding.
+ *
+ * The reduction is stepped, for the reason `drawStepped` gives, and it is the same
+ * `reductionSteps` chain the still path uses. Measured, that changes nothing for
+ * every camera anyone has: at 2.1 megapixels the cap asks for 1.00x from 1080p,
+ * 1.33x from 1440p and 1.99x from 4K, all of which are one step, so the draw is
+ * the same single draw it always was. Above 4K it is two steps, and there it
+ * matters: on an 8K frame of a screen with a visible pixel grid, one tap left the
+ * symbol readable only at ladder rung 3 where the stepped chain read it at rung 1.
+ * Paying for that with an extra canvas only on the frames that need one keeps the
+ * common path exactly as cheap as before.
+ */
 export function imageDataFromVideo(
 	video: { videoWidth: number; videoHeight: number },
 	deps: ImageDecodeDeps = {},
-	maxEdge = 720,
+	maxPixels = MAX_CAMERA_PIXELS,
 ): ImageDataLike {
 	const { videoWidth, videoHeight } = video;
 	if (videoWidth === 0 || videoHeight === 0) {
 		throw new ImageDecodeError('video');
 	}
 
-	const longest = Math.max(videoWidth, videoHeight);
-	const scale = longest > maxEdge ? maxEdge / longest : 1;
-	const width = Math.max(1, Math.round(videoWidth * scale));
-	const height = Math.max(1, Math.round(videoHeight * scale));
+	const [width, height] = targetSize(videoWidth, videoHeight, maxPixels);
 
-	const canvas = (deps.createCanvas ?? defaultCanvas)(width, height);
-	canvas.width = width;
-	canvas.height = height;
-
-	const context = canvas.getContext('2d');
-	if (context === null) {
-		throw new ImageDecodeError('video');
+	const create = deps.createCanvas ?? defaultCanvas;
+	let cached = videoChain;
+	const last = cached === null ? undefined : cached.steps[cached.steps.length - 1];
+	// Keyed on the factory as well as the sizes: two scans with different canvas
+	// sources must not hand each other their pixels.
+	if (
+		cached === null ||
+		last === undefined ||
+		cached.create !== create ||
+		cached.sourceWidth !== videoWidth ||
+		cached.sourceHeight !== videoHeight ||
+		last.width !== width ||
+		last.height !== height
+	) {
+		const steps = reductionSteps(videoWidth, videoHeight, width, height).map(
+			([stepWidth, stepHeight]) => {
+				const canvas = create(stepWidth, stepHeight);
+				canvas.width = stepWidth;
+				canvas.height = stepHeight;
+				// `willReadFrequently` matters more than it looks: without it the engine
+				// may keep the canvas GPU-backed, and then every getImageData is a
+				// readback stall inside the per-frame budget.
+				const found = canvas.getContext('2d', { willReadFrequently: true });
+				if (found === null) {
+					throw new ImageDecodeError('video');
+				}
+				found.imageSmoothingEnabled = true;
+				found.imageSmoothingQuality = 'high';
+				return { canvas, context: found, width: stepWidth, height: stepHeight };
+			},
+		);
+		cached = { create, sourceWidth: videoWidth, sourceHeight: videoHeight, steps };
+		videoChain = cached;
 	}
 
-	context.drawImage(video as never, 0, 0, width, height);
-	return context.getImageData(0, 0, width, height);
+	let source: unknown = video;
+	for (const step of cached.steps) {
+		step.context.drawImage(source as never, 0, 0, step.width, step.height);
+		source = step.canvas;
+	}
+
+	const final = cached.steps[cached.steps.length - 1];
+	if (final === undefined) {
+		throw new ImageDecodeError('video');
+	}
+	return final.context.getImageData(0, 0, final.width, final.height);
+}
+
+/** Drop the reused frame canvases. For tests, and for a caller shutting down. */
+export function releaseVideoCanvas(): void {
+	videoChain = null;
 }

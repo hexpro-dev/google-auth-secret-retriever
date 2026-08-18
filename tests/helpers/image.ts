@@ -1,5 +1,5 @@
 import { quadrilateralToQuadrilateral } from '../../src/qr/decode/transform.js';
-import type { ImageDataLike } from '../../src/types.js';
+import type { ImageDataLike, Point } from '../../src/types.js';
 
 /**
  * Image degradations, so the decoder is tested against something closer to what
@@ -230,9 +230,212 @@ export function gradient(image: ImageDataLike, amount = 90): ImageDataLike {
 	return out;
 }
 
-/** Paste onto a larger light canvas, as a screenshot of a whole screen would. */
-export function pad(image: ImageDataLike, margin: number): ImageDataLike {
-	const out = blank(image.width + margin * 2, image.height + margin * 2);
+/** Bilinear sample, so a warp does not alias its own module grid away. */
+function sampleSmooth(image: ImageDataLike, x: number, y: number): number {
+	const cx = Math.min(image.width - 1, Math.max(0, x));
+	const cy = Math.min(image.height - 1, Math.max(0, y));
+	const x0 = Math.floor(cx);
+	const y0 = Math.floor(cy);
+	const x1 = Math.min(image.width - 1, x0 + 1);
+	const y1 = Math.min(image.height - 1, y0 + 1);
+	const fx = cx - x0;
+	const fy = cy - y0;
+
+	const at = (px: number, py: number) => image.data[(py * image.width + px) * 4] as number;
+	return (
+		at(x0, y0) * (1 - fx) * (1 - fy) +
+		at(x1, y0) * fx * (1 - fy) +
+		at(x0, y1) * (1 - fx) * fy +
+		at(x1, y1) * fx * fy
+	);
+}
+
+export interface Placement {
+	readonly image: ImageDataLike;
+	/**
+	 * Where the source image's own corners landed, clockwise from the top-left.
+	 *
+	 * Returned so a test can compute the true position of any module through the
+	 * same homography the scene was built with, which is the only way to check
+	 * that the decoder found the right pattern rather than a lucky one.
+	 */
+	readonly quad: readonly [Point, Point, Point, Point];
+}
+
+export interface PlaceOptions {
+	/** Rotation about the vertical axis, in degrees. */
+	readonly yaw?: number;
+	/** Rotation about the horizontal axis, in degrees. */
+	readonly pitch?: number;
+	/** Rotation in the image plane, in degrees. */
+	readonly roll?: number;
+	/** Fraction of the shorter canvas edge the placement spans. */
+	readonly fill?: number;
+	readonly width?: number;
+	readonly height?: number;
+	readonly background?: number;
+	/**
+	 * Camera distance, in half-widths of the subject.
+	 *
+	 * Eight by default, which is a 7 cm phone screen photographed from 30 cm.
+	 * Lower numbers are a wider lens held closer, and the projective distortion
+	 * grows quickly: at three, the far corner of a version 27 symbol lands
+	 * twenty-five modules from where an affine fit predicts.
+	 */
+	readonly distance?: number;
+}
+
+/**
+ * Photograph a flat image from an angle.
+ *
+ * A real pinhole projection of a plane, not a keystone. The distinction matters:
+ * tapering each row horizontally by an amount that depends on its height looks
+ * like perspective and is not a projective map of a plane at all, so no
+ * eight-coefficient transform can invert it and a decoder that handles genuine
+ * photographs perfectly well fails on it.
+ */
+export function place(image: ImageDataLike, options: PlaceOptions = {}): Placement {
+	const width = options.width ?? Math.round(Math.max(image.width, image.height) * 1.6);
+	const height = options.height ?? width;
+	const fill = options.fill ?? 0.7;
+	const yaw = ((options.yaw ?? 0) * Math.PI) / 180;
+	const pitch = ((options.pitch ?? 0) * Math.PI) / 180;
+	const roll = ((options.roll ?? 0) * Math.PI) / 180;
+
+	// The source rectangle in plane coordinates, longest edge spanning 2.
+	const longest = Math.max(image.width, image.height);
+	const halfX = image.width / longest;
+	const halfY = image.height / longest;
+	const corners: ReadonlyArray<readonly [number, number]> = [
+		[-halfX, -halfY],
+		[halfX, -halfY],
+		[halfX, halfY],
+		[-halfX, halfY],
+	];
+
+	const distance = options.distance ?? 8;
+	const projected = corners.map(([x0, y0]) => {
+		const rx = x0 * Math.cos(roll) - y0 * Math.sin(roll);
+		const ry = x0 * Math.sin(roll) + y0 * Math.cos(roll);
+		// Yaw about the vertical axis, then pitch about the horizontal one.
+		const x1 = rx * Math.cos(yaw);
+		const z1 = -rx * Math.sin(yaw);
+		const y2 = ry * Math.cos(pitch) - z1 * Math.sin(pitch);
+		const z2 = ry * Math.sin(pitch) + z1 * Math.cos(pitch);
+		const depth = distance + z2;
+		return { x: x1 / depth, y: y2 / depth };
+	});
+
+	const minX = Math.min(...projected.map((p) => p.x));
+	const maxX = Math.max(...projected.map((p) => p.x));
+	const minY = Math.min(...projected.map((p) => p.y));
+	const maxY = Math.max(...projected.map((p) => p.y));
+	const scale = (Math.min(width, height) * fill) / Math.max(maxX - minX, maxY - minY);
+
+	const onCanvas = (p: { x: number; y: number }): Point => ({
+		x: width / 2 + (p.x - (minX + maxX) / 2) * scale,
+		y: height / 2 + (p.y - (minY + maxY) / 2) * scale,
+	});
+	const quad: readonly [Point, Point, Point, Point] = [
+		onCanvas(projected[0] as { x: number; y: number }),
+		onCanvas(projected[1] as { x: number; y: number }),
+		onCanvas(projected[2] as { x: number; y: number }),
+		onCanvas(projected[3] as { x: number; y: number }),
+	];
+
+	return { image: warpInto(image, quad, width, height, options.background ?? 255), quad };
+}
+
+/** Paint an image into an arbitrary quadrilateral on a flat canvas. */
+export function warpInto(
+	image: ImageDataLike,
+	quad: readonly [Point, Point, Point, Point],
+	width: number,
+	height: number,
+	background = 255,
+): ImageDataLike {
+	const out = blank(width, height, background);
+	const toSource = quadrilateralToQuadrilateral(quad, [
+		{ x: 0, y: 0 },
+		{ x: image.width - 1, y: 0 },
+		{ x: image.width - 1, y: image.height - 1 },
+		{ x: 0, y: image.height - 1 },
+	]);
+
+	const minX = Math.max(0, Math.floor(Math.min(...quad.map((p) => p.x))));
+	const maxX = Math.min(width - 1, Math.ceil(Math.max(...quad.map((p) => p.x))));
+	const minY = Math.max(0, Math.floor(Math.min(...quad.map((p) => p.y))));
+	const maxY = Math.min(height - 1, Math.ceil(Math.max(...quad.map((p) => p.y))));
+
+	for (let y = minY; y <= maxY; y += 1) {
+		for (let x = minX; x <= maxX; x += 1) {
+			const source = toSource.apply(x, y);
+			if (
+				source.x < -0.5 ||
+				source.y < -0.5 ||
+				source.x > image.width - 0.5 ||
+				source.y > image.height - 0.5
+			) {
+				continue;
+			}
+			setGrey(out, x, y, Math.round(sampleSmooth(image, source.x, source.y)));
+		}
+	}
+
+	return out;
+}
+
+/**
+ * Reduce by a fractional factor, averaging the whole footprint.
+ *
+ * For building a symbol at a non-integer number of pixels per module, which is
+ * what a screenshot scaled by a browser or a photograph at arm's length gives
+ * you, and where the sampling floor actually sits.
+ */
+export function shrink(image: ImageDataLike, factor: number): ImageDataLike {
+	const width = Math.max(1, Math.floor(image.width / factor));
+	const height = Math.max(1, Math.floor(image.height / factor));
+	const out = blank(width, height);
+
+	for (let y = 0; y < height; y += 1) {
+		for (let x = 0; x < width; x += 1) {
+			let total = 0;
+			let count = 0;
+			for (
+				let sy = Math.floor(y * factor);
+				sy < Math.min(image.height, (y + 1) * factor);
+				sy += 1
+			) {
+				for (
+					let sx = Math.floor(x * factor);
+					sx < Math.min(image.width, (x + 1) * factor);
+					sx += 1
+				) {
+					total += sample(image, sx, sy);
+					count += 1;
+				}
+			}
+			setGrey(out, x, y, Math.round(total / Math.max(1, count)));
+		}
+	}
+
+	return out;
+}
+
+/** Scale every level down, as a photograph taken in poor light does. */
+export function dim(image: ImageDataLike, gain: number, lift = 0): ImageDataLike {
+	const out = blank(image.width, image.height);
+	for (let y = 0; y < image.height; y += 1) {
+		for (let x = 0; x < image.width; x += 1) {
+			setGrey(out, x, y, Math.min(255, Math.round(sample(image, x, y) * gain + lift)));
+		}
+	}
+	return out;
+}
+
+/** Paste onto a larger canvas, as a screenshot of a whole screen would. */
+export function pad(image: ImageDataLike, margin: number, background = 255): ImageDataLike {
+	const out = blank(image.width + margin * 2, image.height + margin * 2, background);
 	for (let y = 0; y < image.height; y += 1) {
 		for (let x = 0; x < image.width; x += 1) {
 			setGrey(out, x + margin, y + margin, sample(image, x, y));

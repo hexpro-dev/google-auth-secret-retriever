@@ -95,10 +95,28 @@ export interface AlignmentMatch {
 	 * every symbol large enough to have an alignment pattern.
 	 */
 	readonly source: number;
+	/**
+	 * How much this candidate fails to look like a bullseye. Lower is better,
+	 * and zero is a perfect one.
+	 */
+	readonly score: number;
+	/** How far it sits from the prediction, in modules. */
+	readonly offset: number;
+}
+
+export interface AlignmentSearchOptions {
+	readonly limit?: number;
+	/**
+	 * Search radius in modules, overriding the prediction-error estimate.
+	 *
+	 * For the second pass only, where the prediction came from a four-point fit
+	 * and is already sub-module accurate.
+	 */
+	readonly radiusModules?: number;
 }
 
 /**
- * Find candidates for the bottom-right alignment pattern, nearest-first.
+ * Find candidates for the bottom-right alignment pattern, best-looking first.
  *
  * An empty list is an ordinary outcome, not a failure: version 1 has no
  * alignment pattern at all, and the caller falls back to extrapolating the
@@ -109,7 +127,7 @@ export function findAlignmentCandidates(
 	transform: PerspectiveTransform,
 	version: number,
 	dimension: number,
-	limit = 3,
+	options: AlignmentSearchOptions = {},
 ): AlignmentMatch[] {
 	const centres = ALIGNMENT_CENTRES[version - 1] as readonly number[];
 	if (centres.length === 0) {
@@ -135,47 +153,47 @@ export function findAlignmentCandidates(
 	// view that extrapolation is off by a good fraction of a symbol width at
 	// the far corner. A window sized to a few modules finds the pattern on a
 	// flat scan and misses it on exactly the photographs it exists to rescue.
-	const radius = Math.max(
-		4,
-		Math.round(Math.min(oneModule * 6 + dimension * oneModule * 0.12, 160)),
-	);
-	// Several candidates, nearest the prediction first, rather than one.
-	//
-	// The window has to be wide because the prediction is poor, and a wide
-	// window on a large symbol can easily contain an *inner* alignment pattern
-	// that happens to sit closer to a badly-off prediction than the bottom-right
-	// one does. Committing to the nearest single hit then drags the whole grid
-	// off the symbol. Handing back a short list and letting the decode decide is
-	// both simpler and more reliable, because the decode is exact and this is a
-	// guess.
+	const radius =
+		options.radiusModules !== undefined
+			? Math.max(2, Math.round(options.radiusModules * oneModule))
+			: Math.max(4, Math.round(Math.min(oneModule * 6 + dimension * oneModule * 0.12, 160)));
+
 	return searchAlignment(
 		image,
 		Math.round(expected.x),
 		Math.round(expected.y),
 		radius,
 		oneModule,
-		limit,
-	).map((point) => ({ point, source: centre + 0.5 }));
+		options.limit ?? 3,
+	).map((candidate) => ({
+		point: candidate.point,
+		source: centre + 0.5,
+		score: candidate.score,
+		offset: candidate.offset,
+	}));
 }
 
 /**
- * Search a window for the alignment pattern, keeping the best match.
+ * Search a window for the alignment pattern, ranked by how much each candidate
+ * looks like one.
  *
- * The check matters more than the search. An alignment pattern is a 5 by 5
- * bullseye, so a line through its centre crosses light, dark, light in equal
- * one-module runs, and it does so along both axes.
+ * The ranking is the whole point, and getting it wrong is what a wide window
+ * costs. An alignment pattern is a 5 by 5 bullseye, so a line through its
+ * centre crosses light, dark, light in equal one-module runs, and it does so in
+ * *every* direction. An ordinary isolated dark data module satisfies that along
+ * the two axes surprisingly often, and there are dozens of them inside a window
+ * sized to cover the affine prediction error. Ranking those by distance from a
+ * prediction that is known to be several modules out is a lottery: the true
+ * pattern came seventh at version 18 and fourteenth at version 26 on measured
+ * scenes, and committing to a wrong point drags the whole grid off the symbol,
+ * so every module after it samples as noise.
  *
- * The tempting weaker test is "an isolated dark module about the right size",
- * and it is badly wrong. A great many modules in a symbol look like that, so
- * with a prediction that is a few dozen pixels out (which is exactly the case
- * on a perspective view, since the first fit is affine) the search locks onto
- * an ordinary data module, the refit drags the whole grid off the symbol, and
- * every module after it samples as noise. That failure is invisible from the
- * outside: three finders located, a confident-looking fit, and a payload that
- * decodes as nothing at all.
- *
- * Candidates are collected across the whole window and returned nearest-first,
- * rather than taking the first hit of an outward spiral.
+ * So quality first, and position only between candidates of equal quality. On
+ * scenes where the affine prediction was up to ten modules out, the true pattern
+ * scored 0.05 or better every time and the best false positive never scored
+ * below 0.29. Position still matters, because two genuine patterns (the
+ * bottom-right one and an inner one that fell inside the window) both score near
+ * zero, and then distance from the prediction is all there is to go on.
  */
 function searchAlignment(
 	image: BitMatrix,
@@ -184,8 +202,8 @@ function searchAlignment(
 	radius: number,
 	moduleSize: number,
 	limit: number,
-): Point[] {
-	const found: { point: Point; distance: number }[] = [];
+): { point: Point; score: number; offset: number }[] {
+	const found: { point: Point; score: number; offset: number }[] = [];
 
 	for (let dy = -radius; dy <= radius; dy += 1) {
 		const y = cy + dy;
@@ -199,54 +217,151 @@ function searchAlignment(
 				continue;
 			}
 
-			const horizontal = alignmentRunCentre(image, x, y, 1, 0, moduleSize);
-			if (horizontal === null) {
-				continue;
-			}
-			const vertical = alignmentRunCentre(image, x, y, 0, 1, moduleSize);
-			if (vertical === null) {
+			const measured = scoreAlignmentAt(image, x, y, moduleSize);
+			if (measured === null) {
 				continue;
 			}
 
-			const point = { x: horizontal, y: vertical };
-			const distance = Math.hypot(point.x - cx, point.y - cy);
+			const { point, score } = measured;
+			const offset = Math.hypot(point.x - cx, point.y - cy) / moduleSize;
 
 			// Cluster: many starting pixels inside one pattern resolve to the
 			// same centre, and those are one candidate rather than hundreds.
-			const already = found.some(
+			// The best-scoring member of the cluster is the one worth keeping.
+			const existing = found.findIndex(
 				(candidate) =>
 					Math.hypot(candidate.point.x - point.x, candidate.point.y - point.y) < moduleSize,
 			);
-			if (!already) {
-				found.push({ point, distance });
+			if (existing < 0) {
+				found.push({ point, score, offset });
+			} else if (score < (found[existing] as { score: number }).score) {
+				found[existing] = { point, score, offset };
 			}
 		}
 	}
 
 	return found
-		.sort((a, b) => a.distance - b.distance)
-		.slice(0, limit)
-		.map((candidate) => candidate.point);
+		.sort((a, b) => {
+			// Quality first, at the resolution quality can actually be measured,
+			// and position only inside a band. Adding a weighted distance instead
+			// looks tidier and cannot work: the weight would have to be small
+			// enough not to swamp the gap between a pattern and a data module
+			// (measured at 0.05 against 0.29) and large enough to separate two
+			// candidates that both score near zero, and there is no such number.
+			const band = Math.floor(a.score / SCORE_BAND) - Math.floor(b.score / SCORE_BAND);
+			return band !== 0 ? band : a.offset - b.offset;
+		})
+		.slice(0, limit);
 }
 
 /**
- * Centre of a light-dark-light run through a point, along one axis.
+ * Scores within this of each other are the same score.
  *
- * Returns the centre coordinate, or null when the three runs are not all about
- * one module wide.
+ * A tenth. Two genuine patterns in one window (the bottom-right one and an inner
+ * one) measured 0.01 to 0.05 apart, and the best data-module false positive
+ * measured 0.29, so a tenth separates the two populations and not the pair.
  */
-function alignmentRunCentre(
+const SCORE_BAND = 0.1;
+
+/** How many directions a bullseye is measured along: both axes, both diagonals. */
+const SCORE_DIRECTIONS = 4;
+
+/**
+ * What a direction with no measurable run triple costs.
+ *
+ * Charged rather than rejected outright, because blur erodes the light ring at
+ * the corners of a pattern before it touches the axes, and a real pattern at
+ * three pixels per module can lose a diagonal. Large enough that a candidate
+ * missing both diagonals loses to any genuine pattern.
+ */
+const MISSING_DIRECTION = 2;
+
+/**
+ * Score a candidate centre, and refine it.
+ *
+ * Null means "not a plausible pattern at all", which is the acceptance test:
+ * both axes have to produce a light-dark-light triple of roughly equal runs, at
+ * roughly the expected module size. The diagonals do not gate, they only score,
+ * and they are where nearly all of the discrimination comes from.
+ */
+function scoreAlignmentAt(
+	image: BitMatrix,
+	x: number,
+	y: number,
+	moduleSize: number,
+): { point: Point; score: number } | null {
+	const horizontal = measureRunTriple(image, x, y, 1, 0, moduleSize);
+	if (horizontal === null || !plausible(horizontal, moduleSize)) {
+		return null;
+	}
+	const vertical = measureRunTriple(image, x, y, 0, 1, moduleSize);
+	if (vertical === null || !plausible(vertical, moduleSize)) {
+		return null;
+	}
+
+	const diagonals = [
+		measureRunTriple(image, x, y, 1, 1, moduleSize),
+		measureRunTriple(image, x, y, 1, -1, moduleSize),
+	];
+
+	let error = horizontal.error + vertical.error;
+	for (const diagonal of diagonals) {
+		error += diagonal === null ? MISSING_DIRECTION : diagonal.error;
+	}
+
+	// Opposite directions of one pair cross the same rings, so a real pattern
+	// implies the same module size along both. The two pairs do not agree with
+	// each other except at 22.5 degrees of rotation, which is why they are
+	// compared within a pair rather than across all four.
+	const axisPair = pairDisagreement(horizontal.size, vertical.size);
+	const diagonalPair =
+		diagonals[0] === null || diagonals[1] === null
+			? MISSING_DIRECTION / 2
+			: pairDisagreement(diagonals[0].size, diagonals[1].size);
+
+	return {
+		point: { x: x + horizontal.offset, y: y + vertical.offset },
+		score: error / SCORE_DIRECTIONS + axisPair + diagonalPair,
+	};
+}
+
+function pairDisagreement(a: number, b: number): number {
+	const mean = (a + b) / 2;
+	return mean > 0 ? Math.abs(a - b) / mean : MISSING_DIRECTION;
+}
+
+interface RunTriple {
+	/** Light, dark centre, light, in steps along the direction. */
+	readonly runs: readonly [number, number, number];
+	/** Implied module size, in pixels. */
+	readonly size: number;
+	/** How far the three runs are from equal, as a scale-free sum of squares. */
+	readonly error: number;
+	/** Where the centre of the middle run sits, in steps from the start point. */
+	readonly offset: number;
+}
+
+/**
+ * Measure the light-dark-light run triple through a point along one direction.
+ *
+ * The outer dark ring is required but not measured: reaching it is what tells a
+ * real pattern from a dark module with a wide light gap beside it, while its
+ * width says nothing, because it touches ordinary data modules more often than
+ * not and its run merges with them.
+ */
+function measureRunTriple(
 	image: BitMatrix,
 	x: number,
 	y: number,
 	dx: number,
 	dy: number,
 	moduleSize: number,
-): number | null {
-	// Walk out from the starting pixel, measuring the rest of the centre module
-	// and the light ring beyond it. The outer dark ring is deliberately not
-	// measured: it touches ordinary data modules more often than not, so its
-	// run merges with them and its width says nothing.
+): RunTriple | null {
+	// A diagonal step covers root two pixels, so runs counted in steps have to
+	// be converted before any size is compared with a module width.
+	const stepLength = dx !== 0 && dy !== 0 ? Math.SQRT2 : 1;
+	const limit = (moduleSize * 3) / stepLength;
+
 	const walk = (sign: number): { centre: number; light: number } | null => {
 		let centre = 0;
 		let light = 0;
@@ -271,7 +386,7 @@ function alignmentRunCentre(
 				return { centre, light };
 			}
 
-			if (centre > moduleSize * 3 || light > moduleSize * 3) {
+			if (centre > limit || light > limit) {
 				return null;
 			}
 
@@ -288,28 +403,41 @@ function alignmentRunCentre(
 		return null;
 	}
 
-	// Three runs: light, dark centre, light. All should be one module wide.
-	const runs = [back.light, back.centre + 1 + forward.centre, forward.light];
-	const mean = (runs[0]! + runs[1]! + runs[2]!) / 3;
-
-	// Compared to each other rather than to `moduleSize` directly, because a
-	// scan across a rotated symbol stretches all three runs by the same factor.
-	// An absolute test would reject the pattern on any photograph held at an
-	// angle, which is most of them.
-	for (const run of runs) {
-		if (Math.abs(run - mean) > mean * 0.6) {
-			return null;
-		}
-	}
-
-	// The absolute size still has to be in the right neighbourhood, or a large
-	// smudge would qualify. Generous enough to cover the axis stretch.
-	if (mean < moduleSize * 0.5 || mean > moduleSize * 2.2) {
+	const runs: [number, number, number] = [
+		back.light,
+		back.centre + 1 + forward.centre,
+		forward.light,
+	];
+	const mean = (runs[0] + runs[1] + runs[2]) / 3;
+	if (mean <= 0) {
 		return null;
 	}
 
-	// The centre module runs from x - back.centre to x + forward.centre, so its
-	// midpoint is offset from the starting pixel by half the difference.
-	const origin = dx !== 0 ? x : y;
-	return origin + (forward.centre - back.centre) / 2;
+	// Normalised by the mean rather than measured in pixels, so the number means
+	// the same thing at four pixels per module as at fifteen.
+	let error = 0;
+	for (const run of runs) {
+		error += ((run - mean) / mean) ** 2;
+	}
+
+	return { runs, size: mean * stepLength, error, offset: (forward.centre - back.centre) / 2 };
+}
+
+/**
+ * Whether a triple is worth scoring at all.
+ *
+ * The runs are compared to each other rather than to `moduleSize` directly,
+ * because a scan across a rotated symbol stretches all three by the same
+ * factor. An absolute test would reject the pattern on any photograph held at
+ * an angle, which is most of them. The absolute size still has to be in the
+ * right neighbourhood, or a large smudge would qualify.
+ */
+function plausible(triple: RunTriple, moduleSize: number): boolean {
+	const mean = (triple.runs[0] + triple.runs[1] + triple.runs[2]) / 3;
+	for (const run of triple.runs) {
+		if (Math.abs(run - mean) > mean * 0.6) {
+			return false;
+		}
+	}
+	return triple.size >= moduleSize * 0.5 && triple.size <= moduleSize * 2.2;
 }

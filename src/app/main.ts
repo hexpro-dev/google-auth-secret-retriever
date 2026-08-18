@@ -72,8 +72,18 @@ async function handleBlob(blob: Blob): Promise<void> {
 	}
 }
 
+/**
+ * Decode budget for a still image.
+ *
+ * Stated at the call site rather than left to the library default, because this
+ * caller knows something the library cannot: the "decoding" stage is already on
+ * screen, so a second and a half spent on a difficult photograph is time the
+ * person can see being used, and giving up in 400 ms is not a kindness.
+ */
+const DECODE_BUDGET_MS = 1500;
+
 function handleImage(image: Parameters<typeof readMigrationQr>[0]): void {
-	const scan = readMigrationQr(image);
+	const scan = readMigrationQr(image, { timeBudgetMs: DECODE_BUDGET_MS });
 	if (!scan.ok) {
 		store.notify({ kind: 'error', text: scan.error.message, detail: scan.error.code });
 		return;
@@ -443,7 +453,7 @@ function wire(): void {
 
 		void (async () => {
 			try {
-				camera = await startCameraScan({
+				const started = await startCameraScan({
 					video,
 					onResult: (result) => {
 						if (result.ok) {
@@ -451,6 +461,13 @@ function wire(): void {
 						}
 					},
 				});
+				// A later start won the race and owns the camera. Keeping this handle
+				// would replace the live one with a handle whose `stop` does nothing, and
+				// then no click could turn the camera off again.
+				if (started.superseded) {
+					return;
+				}
+				camera = started;
 				store.setCamera(true);
 				video.hidden = false;
 			} catch (error) {

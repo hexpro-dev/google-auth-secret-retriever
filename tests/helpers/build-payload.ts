@@ -225,3 +225,48 @@ export const SILENT: AccountSpec = {
 	secret: syntheticSecret('silent', 20),
 	name: 'quiet@example.com',
 };
+
+const ISSUERS = [
+	'Example Bank',
+	'Northwind Cloud',
+	'Contoso Mail',
+	'Fabrikam VPN',
+	'Adventure Works',
+	'Tailspin Toys',
+	'Wide World Importers',
+	'Proseware Hosting',
+	'Litware Analytics',
+	'Lucerne Publishing',
+];
+
+/**
+ * A synthetic export of a given size, for testing large symbols.
+ *
+ * Ten accounts is a version 27 symbol at 125 modules, which is the case that
+ * actually fails in the field: the same phone shows it at the same physical size
+ * as a two-account export, so every module is less than half as wide. Field
+ * values mirror a real export (SHA1, six digits, TOTP, payload version 2, one
+ * batch) and secret lengths alternate between 10 and 20 bytes because a real
+ * export's do, which changes the encoded length.
+ */
+export function syntheticExport(accounts: number): string {
+	const specs: AccountSpec[] = [];
+	for (let i = 0; i < accounts; i += 1) {
+		const issuer = ISSUERS[i % ISSUERS.length] as string;
+		specs.push({
+			secret: syntheticSecret(`export-${i}`, i % 2 === 0 ? 20 : 10),
+			name: `${issuer}:user${i + 1}@example.com`,
+			issuer,
+			algorithm: ALGORITHM.SHA1,
+			digits: DIGITS.SIX,
+			type: TYPE.TOTP,
+		});
+	}
+
+	return toMigrationUri({
+		accounts: specs,
+		batchSize: 1,
+		batchIndex: 0,
+		batchId: 1234567 + accounts,
+	});
+}

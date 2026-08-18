@@ -149,9 +149,28 @@ if (isCameraAvailable()) {
 			}
 		},
 	});
-	// handle.stop() releases the camera. It is also released on tab hide.
+	// Two starts in the same second (a re-render, a double tap) both reach
+	// getUserMedia, and the later one owns the camera. Never let a superseded
+	// handle replace a live one: its stop() does nothing, so the camera would be
+	// left running with nothing able to turn it off.
+	if (!handle.superseded) {
+		live = handle;
+	}
+	// handle.stop() releases the camera. It is also released on tab hide, and if
+	// the track ends underneath the scan.
 }
 ```
+
+The stream is asked for at 1920 by 1080 as a soft constraint, which a smaller
+sensor simply ignores, and the frame reaches the decoder at up to
+`MAX_CAMERA_PIXELS` rather than being reduced to a fixed long edge. That matters
+for a large export: a ten-account code is 125 modules across, and at a 720-pixel
+frame it arrives below the Nyquist limit, unreadable however good the camera is.
+Each frame gets five rungs of the decode ladder, which is what covers both
+polarities at both of the cheap scales, and the gap after a decode is at least as
+long as that decode took, so the decoder never holds much more than half the
+thread however slow the device is. The `live` status carries the settings the
+camera really gave you.
 
 ## What it supports
 

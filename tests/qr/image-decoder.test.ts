@@ -4,9 +4,11 @@ import type { DecodeFrame } from '../../src/qr/decode/telemetry.js';
 import { encodeQr } from '../../src/qr/encode/encoder.js';
 import { renderQrImageData } from '../../src/qr/encode/render.js';
 import type { ImageDataLike } from '../../src/types.js';
+import { syntheticExport } from '../helpers/build-payload.js';
 import { expectErr, expectOk } from '../helpers/expect-result.js';
 import {
 	blur,
+	dim,
 	glare,
 	gradient,
 	invert,
@@ -14,8 +16,10 @@ import {
 	noise,
 	pad,
 	perspective,
+	place,
 	rotate,
 	rotateQuarter,
+	shrink,
 } from '../helpers/image.js';
 
 /**
@@ -32,6 +36,26 @@ const PAYLOAD =
 
 function render(text: string, scale = 6): ImageDataLike {
 	return renderQrImageData(encodeQr(text, { ecLevel: 'M' }), { scale, quietZone: 4 });
+}
+
+/** A synthetic export of a given size, rendered at a plausible screen density. */
+function exportImage(accounts: number, scale = 6): ImageDataLike {
+	return render(syntheticExport(accounts), scale);
+}
+
+/** Photograph a rendered symbol, in a frame only a little larger than it. */
+function photograph(image: ImageDataLike, tilt: { yaw?: number; pitch?: number }): ImageDataLike {
+	return place(image, {
+		...tilt,
+		fill: 0.9,
+		width: Math.round(image.width * 1.25),
+		background: 236,
+	}).image;
+}
+
+/** Every pairing of two lists, for a table-driven case list. */
+function cross<A, B>(first: readonly A[], second: readonly B[]): Array<[A, B]> {
+	return first.flatMap((a) => second.map((b): [A, B] => [a, b]));
 }
 
 describe('decodeQrFromImageData on clean renders', () => {
@@ -135,6 +159,114 @@ describe('decodeQrFromImageData on degraded images', () => {
 			11,
 		);
 		expect(expectOk(decodeQrFromImageData(image)).text).toBe(PAYLOAD);
+	});
+});
+
+describe('decodeQrFromImageData on photographs held at an angle', () => {
+	// The corpus cliff, turned into a gate. Yaw 20 read and yaw 22 failed before
+	// the alignment search started ranking candidates by how much they look like a
+	// pattern rather than by how close they sit to a prediction that is known to
+	// be several modules wrong.
+	const angles = [0, 10, 20, 25, 30];
+
+	it.each(cross([2, 5, 10], angles))('reads a %i-account export at yaw %i', (accounts, yaw) => {
+		const image = photograph(exportImage(accounts), { yaw });
+		expect(expectOk(decodeQrFromImageData(image)).text).toBe(syntheticExport(accounts));
+	});
+
+	it.each(cross([2, 5, 10], angles))('reads a %i-account export at pitch %i', (accounts, pitch) => {
+		const image = photograph(exportImage(accounts), { pitch });
+		expect(expectOk(decodeQrFromImageData(image)).text).toBe(syntheticExport(accounts));
+	});
+
+	it('reads one tilted on both axes at once', () => {
+		const image = photograph(exportImage(10), { yaw: 22, pitch: 18 });
+		expect(expectOk(decodeQrFromImageData(image)).text).toBe(syntheticExport(10));
+	});
+});
+
+describe('decodeQrFromImageData on a large export', () => {
+	// Ten accounts is 125 modules. The same phone shows it at the same physical
+	// size as a two-account export, so every module is less than half as wide,
+	// and this is the case the tool was failing in the field.
+	it('reads a ten-account export from a phone screenshot', () => {
+		const image = pad(exportImage(10, 4), 120);
+		const result = expectOk(decodeQrFromImageData(image));
+
+		expect(result.text).toBe(syntheticExport(10));
+		expect(result.version).toBeGreaterThanOrEqual(26);
+	});
+
+	it('keeps enough resolution to sample a fifteen-account export', () => {
+		// Fifteen accounts is the largest this tool plans for. The assertion that
+		// matters is not just that it decodes: it is that the module size reaching
+		// the sampler stayed above four pixels, because below that the resolution
+		// policy has quietly thrown the symbol away and any pass is luck.
+		const frames: DecodeFrame[] = [];
+		const image = pad(exportImage(15, 5), 200);
+		const result = expectOk(
+			decodeQrFromImageData(image, { onTelemetry: (frame) => frames.push(frame) }),
+		);
+
+		expect(result.text).toBe(syntheticExport(15));
+
+		const finders = frames.find((frame) => frame.stage === 'finders');
+		const sizes =
+			finders?.stage === 'finders' ? finders.patterns.map((pattern) => pattern.moduleSize) : [];
+		expect(Math.min(...sizes)).toBeGreaterThan(4);
+	});
+
+	it('reads a ten-account export photographed off-axis and softly focused', () => {
+		const image = blur(photograph(exportImage(10), { yaw: 18, pitch: 12 }), 1);
+		expect(expectOk(decodeQrFromImageData(image)).text).toBe(syntheticExport(10));
+	});
+});
+
+describe('decodeQrFromImageData on the awkward rungs', () => {
+	it('reads a symbol on a dark background within a camera frame', () => {
+		// Five is what the camera path allows itself per frame, so a polarity guess
+		// that comes out wrong has to be recoverable inside that.
+		const image = pad(render(PAYLOAD, 6), 60, 20);
+		const result = expectOk(decodeQrFromImageData(image, { maxAttempts: 5 }));
+
+		expect(result.text).toBe(PAYLOAD);
+	});
+
+	it('reads a dim, noisy capture that needs both a downscale and the other polarity', () => {
+		// The rung this exercises did not exist: every scale-changing rung carried
+		// the polarity guess unchanged, so a dim frame, where the guess is most
+		// likely to be wrong, had no rung that offered both. It is also inside the
+		// camera's five, which is the point of putting the cheap scales early:
+		// measured on 32 dim scenes, this pair of rungs won 23 of them.
+		const image = noise(dim(invert(render(PAYLOAD, 8)), 0.32, 16), 26, 3);
+		const result = expectOk(decodeQrFromImageData(image, { maxAttempts: 5 }));
+
+		expect(result.text).toBe(PAYLOAD);
+		expect(result.attempt.scale).toBe('half');
+	});
+
+	it('reads a symbol below the sampling floor by upscaling it', () => {
+		// 2.2 pixels per module with a soft lens on top. Nearest-neighbour
+		// upscaling scores no better than not upscaling at all here; interpolating
+		// recovers it, because at this resolution the intermediate greys are real
+		// information about where the module edge sits.
+		const image = pad(blur(shrink(render(PAYLOAD, 10), 10 / 2.2), 1), 8);
+		const result = expectOk(decodeQrFromImageData(image));
+
+		expect(result.text).toBe(PAYLOAD);
+		expect(result.attempt.scale).toBe('double');
+	});
+
+	it('keeps the upscale rung last, where only a still image reaches it', () => {
+		// It costs five to twelve times what any other rung costs (52 to 64 ms
+		// against 5 to 10 on a 1080p frame) and on 32 dim scenes it won none of
+		// them, so a camera buying it on every frame buys nothing. It stays in the
+		// ladder because a still photograph of a small symbol genuinely needs it,
+		// and a still image has the budget for all nine rungs.
+		const image = pad(blur(shrink(render(PAYLOAD, 10), 10 / 2.2), 1), 8);
+
+		expect(decodeQrFromImageData(image, { maxAttempts: 5 }).ok).toBe(false);
+		expect(expectOk(decodeQrFromImageData(image)).attempt.attempt).toBe(9);
 	});
 });
 

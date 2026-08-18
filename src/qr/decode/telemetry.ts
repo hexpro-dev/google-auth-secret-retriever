@@ -21,8 +21,26 @@ export interface TelemetryFinder {
 	readonly confidence: number;
 }
 
+/**
+ * Why a decode stopped.
+ *
+ * `geometry` and `checksum` are worth telling apart, and conflating them is
+ * actively misleading. `geometry` means the markers were found and no grid could
+ * be laid over them that read as a symbol at all: the modules were probably
+ * perfectly legible and the fit was wrong, so "hold the camera square on" is the
+ * advice. `checksum` means a grid did fit, its format information read cleanly,
+ * and the data underneath was too damaged to repair, which is the only case
+ * where "retake the photograph" is the right thing to say.
+ *
+ * Every member here is produced by the decoder. A reason nothing can emit is
+ * worse than no reason at all: it puts a sentence in a consumer's label map that
+ * no user will ever see, and it invites a switch arm that cannot be tested.
+ * `'no-extract'` and `'empty'` were both in that state and are gone; `geometry`
+ * says what `'no-extract'` was reaching for, and an empty symbol decodes to an
+ * empty string rather than failing.
+ */
 export type DecodeFailureReason =
-	'no-finders' | 'partial-finders' | 'no-extract' | 'checksum' | 'unsupported' | 'empty';
+	'no-finders' | 'partial-finders' | 'geometry' | 'checksum' | 'unsupported';
 
 export type DecodeFrame =
 	| { readonly stage: 'source'; readonly width: number; readonly height: number }

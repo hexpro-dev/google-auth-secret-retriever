@@ -8,10 +8,12 @@
  */
 
 export {
+	MAX_CAMERA_PIXELS,
 	imageDataFromBlob,
 	imageDataFromClipboard,
 	imageDataFromFile,
 	imageDataFromVideo,
+	releaseVideoCanvas,
 } from './image-source.js';
 export type { CanvasContextLike, CanvasLike, ImageDecodeDeps, ImageLike } from './image-source.js';
 

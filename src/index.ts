@@ -82,7 +82,11 @@ export { bytesEqual, fromHex, toHex, wipe } from './encoding/bytes.js';
 
 /* ── QR ───────────────────────────────────────────────────────────────────── */
 
-export { decodeQrFromBitMatrix, decodeQrFromImageData } from './qr/decode/decoder.js';
+export {
+	MAX_WORK_PIXELS,
+	decodeQrFromBitMatrix,
+	decodeQrFromImageData,
+} from './qr/decode/decoder.js';
 export type {
 	Binariser,
 	DecodeAttemptDescriptor,

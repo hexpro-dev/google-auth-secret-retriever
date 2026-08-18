@@ -329,6 +329,20 @@ function runTowards(matrix: BitMatrix, from: Point, to: Point): number | null {
  * entirely, because that axis is the one the module count is actually counted
  * along.
  */
+export function moduleSizeAcross(matrix: BitMatrix, a: Point, b: Point): number | null {
+	// Both ends of the axis, not just one. The estimate used to come from the
+	// top-left finder alone, and on a keystone view the far finder is genuinely a
+	// different size: on a 12 per cent keystone the two ends disagree by 3.7 per
+	// cent, which is a whole version step of dimension error on a large symbol
+	// and eats the tolerance `candidateDimensions` exists to provide.
+	const here = moduleSizeBetween(matrix, a, b);
+	const there = moduleSizeBetween(matrix, b, a);
+	if (here === null) {
+		return there;
+	}
+	return there === null ? here : (here + there) / 2;
+}
+
 export function moduleSizeBetween(matrix: BitMatrix, a: Point, b: Point): number | null {
 	const forward = runTowards(matrix, a, b);
 	if (forward === null) {

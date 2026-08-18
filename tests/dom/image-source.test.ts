@@ -1,11 +1,15 @@
 import { describe, expect, it, vi } from 'vitest';
 import {
+	type CanvasContextLike,
 	type CanvasLike,
+	MAX_CAMERA_PIXELS,
 	imageDataFromBlob,
 	imageDataFromClipboard,
 	imageDataFromVideo,
+	releaseVideoCanvas,
 } from '../../src/dom/image-source.js';
 import { ImageDecodeError } from '../../src/errors.js';
+import { MAX_WORK_PIXELS } from '../../src/qr/decode/decoder.js';
 import type { ImageDataLike } from '../../src/types.js';
 
 /**
@@ -14,35 +18,85 @@ import type { ImageDataLike } from '../../src/types.js';
  * No jsdom. Every entry point takes an injectable dependency bag precisely so
  * the interesting part (mapping browser failures onto errors a person can act
  * on) is covered by tests rather than by hope.
+ *
+ * The resolution policy is here rather than in the decoder tests because this is
+ * where it was wrong: this layer capped the long edge at 1600, the decoder was
+ * then asked for 1400, and because its own fit could only halve, every
+ * photograph over 1400 pixels was decoded at 800.
  */
 
-function fakeCanvas(): { canvas: CanvasLike; drawn: unknown[]; lastSize: [number, number] } {
-	const drawn: unknown[] = [];
-	let lastSize: [number, number] = [0, 0];
+interface Draw {
+	readonly from: [number, number];
+	readonly to: [number, number];
+}
 
-	const canvas: CanvasLike = {
-		width: 0,
-		height: 0,
-		getContext: () => ({
-			drawImage: (source: never, _x: number, _y: number, width?: number, height?: number) => {
-				drawn.push(source);
-				lastSize = [width ?? 0, height ?? 0];
+/** A canvas factory that records what was drawn through it, and how. */
+function recorder(): {
+	create: (width: number, height: number) => CanvasLike;
+	readonly draws: Draw[];
+	readonly contexts: CanvasContextLike[];
+	readonly options: Array<{ readonly willReadFrequently?: boolean } | undefined>;
+	readonly canvases: number;
+} {
+	const draws: Draw[] = [];
+	const contexts: CanvasContextLike[] = [];
+	const options: Array<{ readonly willReadFrequently?: boolean } | undefined> = [];
+	let canvases = 0;
+
+	const create = (width: number, height: number): CanvasLike => {
+		canvases += 1;
+		const canvas: CanvasLike = {
+			width,
+			height,
+			getContext: (_type, contextOptions) => {
+				const context: CanvasContextLike = {
+					drawImage: (source: never, _x: number, _y: number, w?: number, h?: number) => {
+						const from = source as unknown as { width: number; height: number };
+						draws.push({ from: [from.width, from.height], to: [w ?? 0, h ?? 0] });
+					},
+					getImageData: (_x: number, _y: number, w: number, h: number): ImageDataLike => {
+						const data = new Uint8ClampedArray(w * h * 4);
+						data.fill(255);
+						return { data, width: w, height: h };
+					},
+				};
+				contexts.push(context);
+				options.push(contextOptions);
+				return context;
 			},
-			getImageData: (_x: number, _y: number, width: number, height: number): ImageDataLike => {
-				const data = new Uint8ClampedArray(width * height * 4);
-				data.fill(255);
-				return { data, width, height };
-			},
-		}),
+		};
+		return canvas;
 	};
 
 	return {
-		canvas,
-		drawn,
-		get lastSize() {
-			return lastSize;
+		create,
+		draws,
+		contexts,
+		options,
+		get canvases() {
+			return canvases;
 		},
 	};
+}
+
+function fakeCanvas(): { canvas: CanvasLike; drawn: unknown[]; lastSize: [number, number] } {
+	const record = recorder();
+	const canvas = record.create(0, 0);
+
+	return {
+		canvas,
+		get drawn() {
+			return record.draws as unknown[];
+		},
+		get lastSize() {
+			const last = record.draws[record.draws.length - 1];
+			return last ? last.to : ([0, 0] as [number, number]);
+		},
+	};
+}
+
+function bitmap(width: number, height: number): typeof createImageBitmap {
+	return (async () => ({ width, height })) as unknown as typeof createImageBitmap;
 }
 
 function fakeBlob(type = 'image/png'): Blob {
@@ -78,34 +132,76 @@ describe('imageDataFromBlob', () => {
 		expect(result.width).toBe(40);
 	});
 
-	it('downscales anything with a very long edge', async () => {
-		// An iPad screenshot is 2732 wide and a phone camera is far more. QR
-		// decoding gains nothing from that and pays for it at every stage.
-		const fake = fakeCanvas();
-		const result = await imageDataFromBlob(fakeBlob(), {
-			createImageBitmap: (async () => ({
-				width: 4000,
-				height: 3000,
-			})) as unknown as typeof createImageBitmap,
-			createCanvas: () => fake.canvas,
+	it('caps the work by area rather than by long edge', async () => {
+		// A 4032 by 1000 panorama and a 4032 by 3024 photograph have the same long
+		// edge and four times the difference in work, and every stage of decoding
+		// is linear in area. Capping the long edge prices them the same.
+		const panorama = await imageDataFromBlob(fakeBlob(), {
+			createImageBitmap: bitmap(4032, 1000),
+			createCanvas: recorder().create,
+		});
+		const photo = await imageDataFromBlob(fakeBlob(), {
+			createImageBitmap: bitmap(4032, 3024),
+			createCanvas: recorder().create,
 		});
 
-		expect(Math.max(result.width, result.height)).toBeLessThanOrEqual(1600);
-		// Aspect ratio preserved.
-		expect(result.width / result.height).toBeCloseTo(4000 / 3000, 2);
+		expect(panorama.width * panorama.height).toBeLessThanOrEqual(MAX_WORK_PIXELS);
+		expect(photo.width * photo.height).toBeLessThanOrEqual(MAX_WORK_PIXELS);
+		// Both arrive at the ceiling, so the panorama keeps its long edge and the
+		// photograph loses two thirds of its own.
+		expect(panorama.width).toBeGreaterThan(photo.width * 1.5);
+		expect(photo.width / photo.height).toBeCloseTo(4032 / 3024, 2);
+	});
+
+	it('reduces in steps of at most two, never in one jump', async () => {
+		// One drawImage from 4032 to 1600 keeps whichever pixels the destination
+		// grid landed on, whatever the quality hint claims, which is how a screen
+		// door pattern becomes stripes the binariser then has to survive.
+		const record = recorder();
+		await imageDataFromBlob(fakeBlob(), {
+			createImageBitmap: bitmap(8000, 6000),
+			createCanvas: record.create,
+		});
+
+		expect(record.draws.length).toBeGreaterThan(1);
+		for (const draw of record.draws) {
+			expect(draw.from[0] / draw.to[0], JSON.stringify(draw)).toBeLessThanOrEqual(2.001);
+			expect(draw.from[1] / draw.to[1], JSON.stringify(draw)).toBeLessThanOrEqual(2.001);
+		}
+	});
+
+	it('asks for the good resampler on every context it draws through', async () => {
+		// The default is 'low', which in Chrome is a single bilinear tap per
+		// destination pixel however far the reduction goes.
+		const record = recorder();
+		await imageDataFromBlob(fakeBlob(), {
+			createImageBitmap: bitmap(4000, 3000),
+			createCanvas: record.create,
+		});
+
+		expect(record.contexts.length).toBeGreaterThan(0);
+		for (const context of record.contexts) {
+			expect(context.imageSmoothingEnabled).toBe(true);
+			expect(context.imageSmoothingQuality).toBe('high');
+		}
 	});
 
 	it('leaves a modest image at its own size', async () => {
-		const fake = fakeCanvas();
 		const result = await imageDataFromBlob(fakeBlob(), {
-			createImageBitmap: (async () => ({
-				width: 800,
-				height: 600,
-			})) as unknown as typeof createImageBitmap,
-			createCanvas: () => fake.canvas,
+			createImageBitmap: bitmap(800, 600),
+			createCanvas: recorder().create,
 		});
 
 		expect([result.width, result.height]).toEqual([800, 600]);
+	});
+
+	it('never enlarges a small screenshot', async () => {
+		const result = await imageDataFromBlob(fakeBlob(), {
+			createImageBitmap: bitmap(300, 220),
+			createCanvas: recorder().create,
+		});
+
+		expect([result.width, result.height]).toEqual([300, 220]);
 	});
 
 	it('rejects SVG rather than rasterising it', async () => {
@@ -203,15 +299,109 @@ describe('imageDataFromClipboard', () => {
 });
 
 describe('imageDataFromVideo', () => {
-	it('downscales a camera frame to the decode size', async () => {
-		const fake = fakeCanvas();
+	it('passes a 1080p frame through untouched', () => {
+		// This is the whole policy. A 1280 by 720 stream used to arrive at the
+		// decoder as 720 by 405, where a ten-account export sits at 1.8 pixels per
+		// module: below Nyquist at every sensor size, so no better camera helped.
+		releaseVideoCanvas();
 		const result = imageDataFromVideo(
-			{ videoWidth: 1280, videoHeight: 720 },
-			{ createCanvas: () => fake.canvas },
-			720,
+			{ videoWidth: 1920, videoHeight: 1080 },
+			{ createCanvas: recorder().create },
 		);
 
-		expect(Math.max(result.width, result.height)).toBe(720);
+		expect([result.width, result.height]).toEqual([1920, 1080]);
+	});
+
+	it('reduces a 4K frame to the camera ceiling, and no further', () => {
+		releaseVideoCanvas();
+		const result = imageDataFromVideo(
+			{ videoWidth: 3840, videoHeight: 2160 },
+			{ createCanvas: recorder().create },
+		);
+
+		expect(result.width * result.height).toBeLessThanOrEqual(MAX_CAMERA_PIXELS);
+		// 1080p rather than 720p, which is what the old long-edge cap gave it.
+		expect(result.height).toBeGreaterThan(1000);
+	});
+
+	it('reuses one canvas while the size holds', () => {
+		// Eight fresh OffscreenCanvas allocations a second is pure garbage, made on
+		// the thread that also has to paint the preview.
+		releaseVideoCanvas();
+		const record = recorder();
+		const video = { videoWidth: 1280, videoHeight: 720 };
+
+		imageDataFromVideo(video, { createCanvas: record.create });
+		imageDataFromVideo(video, { createCanvas: record.create });
+		imageDataFromVideo(video, { createCanvas: record.create });
+
+		expect(record.canvases).toBe(1);
+		expect(record.draws).toHaveLength(3);
+	});
+
+	it('takes one draw for every frame a camera actually produces', () => {
+		// The camera ceiling asks for 1.00x from 1080p, 1.33x from 1440p and 1.99x
+		// from 4K, all of which a single bilinear tap gets right, so the stepped
+		// chain must not add a canvas or a draw to any of them.
+		for (const [width, height] of [
+			[1280, 720],
+			[1920, 1080],
+			[2560, 1440],
+			[3840, 2160],
+		] as const) {
+			releaseVideoCanvas();
+			const record = recorder();
+			imageDataFromVideo(
+				{ videoWidth: width, videoHeight: height },
+				{ createCanvas: record.create },
+			);
+
+			expect(record.canvases, `${width}x${height}`).toBe(1);
+			expect(record.draws, `${width}x${height}`).toHaveLength(1);
+		}
+	});
+
+	it('steps an above-4K frame rather than throwing three quarters of it away', () => {
+		// An 8K frame is a 3.98x reduction, where one tap keeps 4 pixels of every 16
+		// and the phase it keeps them at is whatever the destination grid landed on.
+		// Measured on an 8K capture of a screen with a visible pixel grid, that left
+		// the symbol readable only at ladder rung 3 where stepping read it at rung 1.
+		releaseVideoCanvas();
+		const record = recorder();
+		const result = imageDataFromVideo(
+			{ videoWidth: 7680, videoHeight: 4320 },
+			{ createCanvas: record.create },
+		);
+
+		expect(record.canvases).toBe(2);
+		expect(record.draws).toHaveLength(2);
+		for (const draw of record.draws.slice(1)) {
+			expect(draw.from[0] / draw.to[0], JSON.stringify(draw)).toBeLessThanOrEqual(2.001);
+		}
+		expect(result.width * result.height).toBeLessThanOrEqual(MAX_CAMERA_PIXELS);
+	});
+
+	it('reuses the whole chain while the frame size holds', () => {
+		releaseVideoCanvas();
+		const record = recorder();
+		const video = { videoWidth: 7680, videoHeight: 4320 };
+
+		imageDataFromVideo(video, { createCanvas: record.create });
+		imageDataFromVideo(video, { createCanvas: record.create });
+		imageDataFromVideo(video, { createCanvas: record.create });
+
+		expect(record.canvases).toBe(2);
+		expect(record.draws).toHaveLength(6);
+	});
+
+	it('asks for a canvas it can read back from cheaply', () => {
+		// Without this the engine may keep the canvas GPU-backed, and then every
+		// getImageData is a readback stall inside the per-frame budget.
+		releaseVideoCanvas();
+		const record = recorder();
+		imageDataFromVideo({ videoWidth: 1280, videoHeight: 720 }, { createCanvas: record.create });
+
+		expect(record.options[0]?.willReadFrequently).toBe(true);
 	});
 
 	it('rejects a video that has no dimensions yet', () => {

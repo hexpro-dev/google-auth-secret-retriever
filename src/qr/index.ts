@@ -11,7 +11,12 @@
 export { BitMatrix } from './bit-matrix.js';
 export { BitReader, BitWriter } from './bit-buffer.js';
 
-export { decodeQrFromBitMatrix, decodeQrFromImageData } from './decode/decoder.js';
+export {
+	BINARISED_TELEMETRY_PIXELS,
+	MAX_WORK_PIXELS,
+	decodeQrFromBitMatrix,
+	decodeQrFromImageData,
+} from './decode/decoder.js';
 export type {
 	Binariser,
 	DecodeAttemptDescriptor,
@@ -28,11 +33,22 @@ export type {
 } from './decode/telemetry.js';
 
 export { binariseHybrid, binariseOtsu, binariseSauvola, otsuThreshold } from './decode/binarise.js';
-export { downscaleHalf, fitWithin, looksInverted, toGrey, upscaleNearest } from './decode/grey.js';
-export type { GreyImage } from './decode/grey.js';
+export {
+	downscaleArea,
+	downscaleHalf,
+	fitPixels,
+	fitToWork,
+	fitWithin,
+	looksInverted,
+	toGrey,
+	upscaleNearest,
+	upscaleSmooth,
+} from './decode/grey.js';
+export type { GreyImage, WorkLimits } from './decode/grey.js';
 export {
 	candidateTriples,
 	findFinderPatterns,
+	moduleSizeAcross,
 	moduleSizeBetween,
 	orderFinders,
 } from './decode/finder.js';

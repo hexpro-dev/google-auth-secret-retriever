@@ -59,12 +59,112 @@ export function downscaleHalf(image: GreyImage): GreyImage {
 }
 
 /**
+ * Reduce to an arbitrary size by averaging each destination pixel's exact
+ * source footprint.
+ *
+ * The alternative, and what a single-step `drawImage` gives you, is a bilinear
+ * tap: two source pixels per axis however far the reduction goes. Reducing 4032
+ * pixels to 1600 that way samples 4 of every 25 source pixels and throws the
+ * rest away, so module edges alias at whatever phase the grid happens to catch
+ * them and the binariser inherits stripes that were never in the symbol.
+ */
+export function downscaleArea(image: GreyImage, width: number, height: number): GreyImage {
+	if (width >= image.width && height >= image.height) {
+		return image;
+	}
+
+	const out = new Uint8Array(width * height);
+	const stepX = image.width / width;
+	const stepY = image.height / height;
+
+	for (let y = 0; y < height; y += 1) {
+		const top = y * stepY;
+		const bottom = Math.min(image.height, (y + 1) * stepY);
+		const firstRow = Math.floor(top);
+		const lastRow = Math.ceil(bottom);
+
+		for (let x = 0; x < width; x += 1) {
+			const left = x * stepX;
+			const right = Math.min(image.width, (x + 1) * stepX);
+			const firstColumn = Math.floor(left);
+			const lastColumn = Math.ceil(right);
+
+			let total = 0;
+			let weight = 0;
+			for (let sy = firstRow; sy < lastRow; sy += 1) {
+				// Partial rows and columns carry their overlap as a weight, which
+				// is what keeps the result free of the periodic bias a rounded
+				// footprint would leave at a non-integer ratio.
+				const wy = Math.min(sy + 1, bottom) - Math.max(sy, top);
+				if (wy <= 0) {
+					continue;
+				}
+				const row = sy * image.width;
+				for (let sx = firstColumn; sx < lastColumn; sx += 1) {
+					const wx = Math.min(sx + 1, right) - Math.max(sx, left);
+					if (wx <= 0) {
+						continue;
+					}
+					total += (image.data[row + sx] as number) * wx * wy;
+					weight += wx * wy;
+				}
+			}
+
+			out[y * width + x] = weight > 0 ? Math.round(total / weight) : 0;
+		}
+	}
+
+	return { data: out, width, height };
+}
+
+/**
+ * Enlarge by an integer factor, interpolating.
+ *
+ * Nearest neighbour is the tempting choice, on the grounds that interpolation
+ * invents intermediate greys along every module edge. That reasoning holds for a
+ * crisp source and is wrong at the resolution this rung exists for: at three
+ * pixels per module the greys are not invented, they are real data about where
+ * the module edge sits, and replicating pixels throws that away. Measured at 2.5
+ * pixels per module under the harsh profile, nearest scores the same as no
+ * upscale at all and this scores 100%.
+ */
+export function upscaleSmooth(image: GreyImage, factor: number): GreyImage {
+	const width = image.width * factor;
+	const height = image.height * factor;
+	const out = new Uint8Array(width * height);
+
+	for (let y = 0; y < height; y += 1) {
+		// Pixel centres, so the interpolation is not half a pixel out.
+		const sourceY = Math.min(image.height - 1, Math.max(0, (y + 0.5) / factor - 0.5));
+		const y0 = Math.floor(sourceY);
+		const y1 = Math.min(image.height - 1, y0 + 1);
+		const fy = sourceY - y0;
+
+		for (let x = 0; x < width; x += 1) {
+			const sourceX = Math.min(image.width - 1, Math.max(0, (x + 0.5) / factor - 0.5));
+			const x0 = Math.floor(sourceX);
+			const x1 = Math.min(image.width - 1, x0 + 1);
+			const fx = sourceX - x0;
+
+			const a = image.data[y0 * image.width + x0] as number;
+			const b = image.data[y0 * image.width + x1] as number;
+			const c = image.data[y1 * image.width + x0] as number;
+			const d = image.data[y1 * image.width + x1] as number;
+
+			out[y * width + x] = Math.round(
+				a * (1 - fx) * (1 - fy) + b * fx * (1 - fy) + c * (1 - fx) * fy + d * fx * fy,
+			);
+		}
+	}
+
+	return { data: out, width, height };
+}
+
+/**
  * Enlarge by an integer factor with nearest-neighbour sampling.
  *
- * Nearest rather than bilinear on purpose. Interpolation invents intermediate
- * greys along every module edge, and the binariser then has to guess which side
- * they belong to. Nearest keeps the two populations separate, which is the only
- * thing that matters here.
+ * Kept for a caller that wants the modules left exactly as they are. The decode
+ * ladder uses `upscaleSmooth` instead; see the note there.
  */
 export function upscaleNearest(image: GreyImage, factor: number): GreyImage {
 	const width = image.width * factor;
@@ -81,17 +181,83 @@ export function upscaleNearest(image: GreyImage, factor: number): GreyImage {
 	return { data: out, width, height };
 }
 
-/** Scale the long edge down to at most `maxEdge`, by whole halvings. */
+/**
+ * Scale the long edge down to at most `maxEdge`, landing on it.
+ *
+ * This used to halve repeatedly, which undershoots any cap by up to a factor of
+ * two: a 1600-pixel image asked to fit 1400 came back at 800, and one extra
+ * pixel of input halved the working resolution. That discontinuity was the
+ * single largest resolution loss in the pipeline, because every still over the
+ * cap decoded at half the resolution it had asked for.
+ *
+ * Whole halvings first, while the next one would still clear the cap, then one
+ * area pass for the remainder. Halving is the ratio at which a box filter and a
+ * bilinear tap agree exactly, so the cheap step is also the accurate one.
+ */
 export function fitWithin(image: GreyImage, maxEdge: number): GreyImage {
+	const longest = Math.max(image.width, image.height);
+	if (longest <= maxEdge) {
+		return image;
+	}
+
+	const scale = maxEdge / longest;
+	return resampleDown(
+		image,
+		Math.max(1, Math.round(image.width * scale)),
+		Math.max(1, Math.round(image.height * scale)),
+	);
+}
+
+/** Reduce to at most `maxPixels`, keeping the aspect ratio. */
+export function fitPixels(image: GreyImage, maxPixels: number): GreyImage {
+	const pixels = image.width * image.height;
+	if (pixels <= maxPixels) {
+		return image;
+	}
+
+	// Floored rather than rounded, so the result is never a pixel over the cap.
+	const scale = Math.sqrt(maxPixels / pixels);
+	return resampleDown(
+		image,
+		Math.max(1, Math.floor(image.width * scale)),
+		Math.max(1, Math.floor(image.height * scale)),
+	);
+}
+
+export interface WorkLimits {
+	/** Preferred: every stage is linear in area, nothing is linear in long edge. */
+	readonly maxPixels?: number;
+	/** Fallback for a caller that genuinely knows its input. Discouraged. */
+	readonly maxEdge?: number;
+}
+
+/** Reduce to the working size, by area when the caller allows it. */
+export function fitToWork(image: GreyImage, limits: WorkLimits): GreyImage {
+	if (limits.maxPixels !== undefined) {
+		return fitPixels(image, limits.maxPixels);
+	}
+	if (limits.maxEdge !== undefined) {
+		return fitWithin(image, limits.maxEdge);
+	}
+	return image;
+}
+
+function resampleDown(image: GreyImage, width: number, height: number): GreyImage {
 	let current = image;
-	while (
-		Math.max(current.width, current.height) > maxEdge &&
-		current.width > 32 &&
-		current.height > 32
-	) {
+	// Halve while a halving would still overshoot the target, then finish with one
+	// area resample. Named rather than inlined because `a >> 1 >= b` is correct (a
+	// shift binds tighter than a comparison) and reads as though it might not be.
+	for (;;) {
+		const halfWidth = current.width >> 1;
+		const halfHeight = current.height >> 1;
+		if (halfWidth < width || halfHeight < height) {
+			break;
+		}
 		current = downscaleHalf(current);
 	}
-	return current;
+	return current.width === width && current.height === height
+		? current
+		: downscaleArea(current, width, height);
 }
 
 /**
@@ -101,6 +267,17 @@ export function fitWithin(image: GreyImage, maxEdge: number): GreyImage {
  * supposed to sit inside a light quiet zone, and the corners are the part of
  * the picture least likely to be the code itself. Used only to decide which
  * polarity the decode ladder tries first; both are tried either way.
+ *
+ * The comparison is against the picture's own light and dark levels rather than
+ * a fixed brightness, which is what makes a dim capture come out right: a photo
+ * taken in poor light has every level scaled down, so a light surround at 63
+ * used to read as dark and flipped the guess for the whole ladder.
+ *
+ * One case this cannot get right, and no global rule can: a correctly polarised
+ * code held over a genuinely dark surface. The corners then are dark and the
+ * quiet zone around the symbol is light, and telling those apart needs the
+ * symbol located first. The cost is one rung, which is why this stays a cheap
+ * guess rather than becoming a stage.
  */
 export function looksInverted(image: GreyImage): boolean {
 	const { data, width, height } = image;
@@ -126,5 +303,28 @@ export function looksInverted(image: GreyImage): boolean {
 
 	samples.sort((a, b) => a - b);
 	const median = (samples[1]! + samples[2]!) / 2;
-	return median < 96;
+
+	// The fifth and ninety-fifth percentiles stand in for "dark" and "light" in
+	// this picture. A third of the way up from dark, rather than halfway, because
+	// a mid-grey surround is common and is not an inverted symbol.
+	const histogram = new Uint32Array(256);
+	for (let i = 0; i < data.length; i += 1) {
+		histogram[data[i] as number] += 1;
+	}
+	const dark = percentile(histogram, data.length, 0.05);
+	const light = percentile(histogram, data.length, 0.95);
+
+	return median < dark + (light - dark) * 0.35;
+}
+
+function percentile(histogram: Uint32Array, total: number, fraction: number): number {
+	const target = total * fraction;
+	let seen = 0;
+	for (let value = 0; value < histogram.length; value += 1) {
+		seen += histogram[value] as number;
+		if (seen >= target) {
+			return value;
+		}
+	}
+	return histogram.length - 1;
 }

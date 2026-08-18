@@ -10,6 +10,10 @@ export default tseslint.config(
 			'dist/**',
 			'coverage/**',
 			'tests/fixtures/**',
+			// Measurement rigs and vendored references. Gitignored and never
+			// shipped, so linting them only makes a working tree disagree with a
+			// clean checkout about whether the gate passes.
+			'scratch/**',
 			'**/*.config.js',
 			'**/*.config.ts',
 		],
