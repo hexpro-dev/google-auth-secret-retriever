@@ -38,6 +38,18 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
+      # A tag ref does not match ci.yml's branch filter, so a release used to be
+      # validated more loosely than an ordinary push: no coverage thresholds, no
+      # dependency assertion, no check of what would actually ship. These three
+      # bring the release path back up to the same bar.
+      - name: Assert zero runtime dependencies
+        run: |
+          COUNT=$(node -p "Object.keys(require('./package.json').dependencies ?? {}).length")
+          if [ "$COUNT" != "0" ]; then
+            echo "This package must have zero runtime dependencies, found $COUNT"
+            exit 1
+          fi
+
       - name: Verify the version matches the tag
         run: |
           TAG="${GITHUB_REF_NAME}"
@@ -61,8 +73,8 @@ jobs:
       - name: Typecheck
         run: pnpm run typecheck
 
-      - name: Test
-        run: pnpm run test
+      - name: Test with coverage
+        run: pnpm run test:coverage
 
       - name: Build
         run: pnpm run build:all
@@ -78,6 +90,9 @@ jobs:
             echo "- size: $BYTES bytes"
             echo "- sha256: \`$SHA\`"
           } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Verify published file list
+        run: pnpm pack --dry-run
 
       - name: Publish to npm
         env:

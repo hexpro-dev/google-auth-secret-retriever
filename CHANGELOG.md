@@ -1,6 +1,8 @@
 # Changelog
 
-## Unreleased
+## 1.0.0
+
+The first published release.
 
 Reading rate, measured on a 408-case corpus of degraded captures: 77% to 92%
 with nothing else changed, and 54% to 91% on the camera path. No case in the
@@ -217,7 +219,9 @@ corpus returns text that was not encoded, before or after.
 
 ## 0.1.0
 
-First release.
+Never published. Tagged nowhere and absent from npm, so the entries above
+that are marked breaking are breaks against this development version rather
+than against anything anyone can have installed.
 
 - Reads a Google Authenticator "Export accounts" QR code from an image or a live
   camera and returns every account with its base32 secret, issuer, account name,

@@ -1,6 +1,6 @@
 {
 	"name": "@hexpro/google-auth-secret-retriever",
-	"version": "0.1.0",
+	"version": "1.0.0",
 	"description": "Extract otpauth URIs and base32 secrets from Google Authenticator export QR codes, entirely in the browser",
 	"keywords": [
 		"google-authenticator",
