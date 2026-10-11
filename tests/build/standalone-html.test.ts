@@ -1,3 +1,5 @@
+import { readFile } from 'node:fs/promises';
+import { fileURLToPath } from 'node:url';
 import { Script } from 'node:vm';
 import { beforeAll, describe, expect, it } from 'vitest';
 import { buildStandaloneHtml } from '../../scripts/build-html.js';
@@ -29,6 +31,15 @@ let script = '';
  * those would make the check meaningless while looking strict.
  */
 let markup = '';
+/** The minified stylesheet, for the rules the markup depends on. */
+let style = '';
+/** The app's source, for the elements it looks up by id. */
+let appSource = '';
+
+/** The opening tag of the element with this id, or undefined. */
+function tagWithId(id: string): string | undefined {
+	return new RegExp(`<[a-z][a-z0-9]*\\b[^>]*\\sid="${id}"[^>]*>`).exec(markup)?.[0];
+}
 
 beforeAll(async () => {
 	const result = await buildStandaloneHtml();
@@ -43,6 +54,11 @@ beforeAll(async () => {
 	markup = html
 		.replace(/<script>[\s\S]*<\/script>/, '<script></script>')
 		.replace(/<style>[\s\S]*?<\/style>/, '<style></style>');
+	style = /<style>([\s\S]*?)<\/style>/.exec(html)?.[1] ?? '';
+	appSource = await readFile(
+		fileURLToPath(new URL('../../src/app/main.ts', import.meta.url)),
+		'utf8',
+	);
 }, 60_000);
 
 describe('the file is a program', () => {
@@ -236,6 +252,93 @@ describe('the content security policy', () => {
 		// The camera needs mediastream:, and the re-import QR is inline SVG.
 		expect(html).toContain('mediastream:');
 		expect(html).toContain("img-src 'self' data: blob:");
+	});
+});
+
+describe('the file can be used without a mouse and without a screen', () => {
+	// None of this is visible in a screenshot, and every item below was wrong
+	// once. Each one is a property of the markup the browser is handed, so it
+	// is checked here rather than left to somebody remembering to test with a
+	// keyboard and a screen reader before a release.
+
+	it('is a standards mode document that says what language it is in', () => {
+		// Without a doctype the page renders in quirks mode, and without `lang` a
+		// screen reader guesses the pronunciation from the reader's own settings.
+		expect(html.startsWith('<!doctype html>')).toBe(true);
+		expect(markup).toMatch(/<html lang="en">/);
+		expect(markup).toMatch(/<title>[^<]+<\/title>/);
+	});
+
+	it('declares its encoding inside the first 1024 bytes', () => {
+		// The HTML standard's limit for the prescan. The policy meta that follows
+		// it is long, so the order matters.
+		const at = html.indexOf('<meta charset="utf-8" />');
+		expect(at).toBeGreaterThanOrEqual(0);
+		expect(at).toBeLessThan(1024);
+		expect(at).toBeLessThan(html.indexOf('Content-Security-Policy'));
+	});
+
+	it('lets zoom alone', () => {
+		const viewport = /<meta name="viewport" content="([^"]*)"/.exec(markup)?.[1];
+		expect(viewport).toBe('width=device-width, initial-scale=1');
+	});
+
+	it('keeps the file input in the tab order, with a visible focus ring on its label', () => {
+		// `hidden` or `display: none` takes a file input out of the tab order, and
+		// then "Choose a file" cannot be reached from the keyboard at all. It is
+		// clipped out of sight instead, the label is what is seen, and the label
+		// wears the focus ring while the input has focus.
+		const input = tagWithId('file');
+		expect(input).toBeDefined();
+		expect(input).toMatch(/type="file"/);
+		expect(input).not.toMatch(/\shidden\b/);
+		expect(input).toMatch(/class="visually-hidden"/);
+		expect(markup).toMatch(/<label for="file" class="button">Choose a file<\/label>/);
+		expect(style).toContain('.visually-hidden:focus-visible+label');
+		const rule = /\.visually-hidden\{([^}]*)\}/.exec(style)?.[1] ?? '';
+		expect(rule).toContain('position:absolute');
+		expect(rule).not.toMatch(/display:\s*none|visibility:\s*hidden/);
+	});
+
+	it('has its live regions in the page from the start, never hidden', () => {
+		// A region inserted, or unhidden, at the same moment as its text is often
+		// not announced at all. These four exist before anything happens and only
+		// their contents change.
+		const regions: Readonly<Record<string, string>> = {
+			alert: 'role="alert"',
+			notice: 'role="status"',
+			progress: 'role="status"',
+			announcer: 'role="status"',
+		};
+		for (const [id, role] of Object.entries(regions)) {
+			const tag = tagWithId(id);
+			expect(tag, `#${id} is missing`).toBeDefined();
+			expect(tag, `#${id}`).toContain(role);
+			expect(tag, `#${id} starts hidden`).not.toMatch(/\shidden\b/);
+		}
+	});
+
+	it('puts no interactive element inside another', () => {
+		// The file input used to sit inside its label. A label holding a control
+		// is valid HTML, but a label styled as a button with an input inside it is
+		// two things to a screen reader and one to everybody else.
+		for (const [, inner] of markup.matchAll(
+			/<(?:label|button|a|summary)\b[^>]*>([\s\S]*?)<\/(?:label|button|a|summary)>/g,
+		)) {
+			expect(inner).not.toMatch(/<(?:input|button|select|textarea|a|label)\b/);
+		}
+		expect(markup).not.toMatch(/role="button"/);
+	});
+
+	it('has every element the program looks up by id', () => {
+		// The markup and the program are joined by strings. Renaming a region on
+		// one side leaves the page working and silent, which is the failure this
+		// whole block is about.
+		const ids = [...appSource.matchAll(/byId(?:<[^>]+>)?\('([^']+)'\)/g)].map((found) => found[1]);
+		expect(ids).toContain('announcer');
+		for (const id of ids) {
+			expect(tagWithId(id as string), `the program looks up #${id}`).toBeDefined();
+		}
 	});
 });
 
