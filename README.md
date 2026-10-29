@@ -12,7 +12,9 @@
   <img alt="Australian owned and operated" src="https://img.shields.io/badge/Australian-owned%20%26%20operated-9F9F9F?style=flat-square&labelColor=1b2530">
 </p>
 
-# Authenticator Secret Extractor: Get Your Secret Keys Out of Google Authenticator
+# Authenticator Secret Extractor
+
+> _Get Your Secret Keys Out of Google Authenticator_
 
 Extract the `otpauth://` URIs and base32 secrets from a Google Authenticator
 "Export accounts" QR code, entirely in the browser.
