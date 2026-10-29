@@ -1,7 +1,27 @@
-# google-auth-secret-retriever
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/hexpro-dev/.github/main/profile/assets/banner-dark.png">
+  <source media="(prefers-color-scheme: light)" srcset="https://raw.githubusercontent.com/hexpro-dev/.github/main/profile/assets/banner-light.png">
+  <img alt="Hex Pro: Software for People" src="https://raw.githubusercontent.com/hexpro-dev/.github/main/profile/assets/banner-light.png" width="100%">
+</picture>
+
+<p align="center">
+  <a href="https://hex.pro"><img alt="hex.pro" src="https://img.shields.io/badge/hex.pro-the%20company-0B76D9?style=flat-square&labelColor=1b2530"></a>
+  <a href="https://apps.hex.pro"><img alt="apps.hex.pro" src="https://img.shields.io/badge/apps.hex.pro-apps%20%26%20tools-0B76D9?style=flat-square&labelColor=1b2530"></a>
+  <a href="https://citadel.hex.pro"><img alt="citadel.hex.pro" src="https://img.shields.io/badge/citadel.hex.pro-file%20sync-0B76D9?style=flat-square&labelColor=1b2530"></a>
+  <a href="https://games.hex.pro"><img alt="Hex Games" src="https://img.shields.io/badge/Hex%20Games-the%20game%20studio-9F9F9F?style=flat-square&logo=github&logoColor=white&labelColor=1b2530"></a>
+  <img alt="Australian owned and operated" src="https://img.shields.io/badge/Australian-owned%20%26%20operated-9F9F9F?style=flat-square&labelColor=1b2530">
+</p>
+
+# Authenticator Secret Extractor: Get Your Secret Keys Out of Google Authenticator
 
 Extract the `otpauth://` URIs and base32 secrets from a Google Authenticator
 "Export accounts" QR code, entirely in the browser.
+
+[![npm: @hexpro/google-auth-secret-retriever](https://img.shields.io/npm/v/@hexpro/google-auth-secret-retriever?style=flat-square&logo=npm&label=%40hexpro%2Fgoogle-auth-secret-retriever&color=9d7cf5)](https://www.npmjs.com/package/@hexpro/google-auth-secret-retriever)
+[![Use it online](https://img.shields.io/badge/apps.hex.pro-Use_it_online-9d7cf5?style=flat-square)](https://apps.hex.pro/tools/google-authenticator-secret-extractor)
+[![Offline app](https://img.shields.io/github/v/release/hexpro-dev/google-auth-secret-retriever?style=flat-square&label=offline%20app&color=5ba3f5)](https://github.com/hexpro-dev/google-auth-secret-retriever/releases/latest)
+[![Licence: MIT](https://img.shields.io/badge/licence-MIT-5ba3f5?style=flat-square)](LICENSE)
+[![No runtime dependencies](https://img.shields.io/badge/runtime_dependencies-none-9b958c?style=flat-square)](package.json)
 
 Zero runtime dependencies. Works on a still image or a live camera, handles the
 multi-code exports Google produces for large account lists, and ships a
