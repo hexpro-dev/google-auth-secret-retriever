@@ -1,5 +1,58 @@
 # Changelog
 
+## Unreleased
+
+The offline app, made usable from a keyboard and with a screen reader. The
+library is unchanged.
+
+### Fixed
+
+- "Choose a file" could not be reached from the keyboard. The file input carried
+  `hidden` inside its label, which takes it out of the tab order, so a keyboard
+  user could paste a screenshot or a link but never choose one. The input is now
+  clipped out of sight instead of hidden, it sits beside its label rather than
+  inside it, and the label shows the focus ring while the input has focus.
+  Enter and Space open the file picker.
+- Nothing the page said was announced. The notice and the multi-part progress
+  line were ordinary paragraphs that started hidden, so a screen reader heard
+  neither an error nor "1 of 3 parts captured". Both are now live regions that
+  are in the page from the moment it loads and are never hidden. Errors go to an
+  alert and everything else to a status. A notice that has not changed is not
+  written again, so revealing a secret does not repeat the last error, and the
+  camera does not repeat "already captured" several times a second.
+- Copying said "Copied" only by changing the button's own text, which most
+  screen readers do not read out. It is announced as well now, naming whose
+  secret or link it was. In a browser with no clipboard at all, which is an http
+  page that is not localhost, the click used to do nothing; it now says to select
+  the text and copy it by hand, as a refused copy already did.
+- Choosing a file with a screen reader gave no sign that anything had happened,
+  because the accounts appear further down the page. "Added 2 accounts." is
+  announced.
+- Pressing Reveal, Hide or a QR panel's summary from the keyboard dropped focus
+  to the top of the document, because every card is rebuilt on each change.
+  Focus returns to the same control on the new card, and an open QR panel stays
+  open. "Clear everything" hides the toolbar its own button is in, so focus now
+  moves to the Accounts heading and the clearing is announced.
+- The page had no doctype, so it rendered in quirks mode, and no `lang`. It
+  declares both now, and its encoding inside the first 1024 bytes. The paste
+  field is a block, so the button under it stays where it was.
+- A hidden secret was read aloud as up to 32 bullets. The bullets are hidden
+  from screen readers, which read the word "Hidden" in their place.
+- Reveal changed its label to "Hide" and was also marked as a pressed toggle,
+  which a screen reader reads as "Hide, pressed". The label alone carries the
+  state now. Each card's buttons are described by the card's heading, so eight
+  buttons called "Copy secret" can be told apart.
+- The paste field's border was 1.37:1 against the page in the light scheme and
+  1.45:1 in the dark one, well under the 3:1 a field needs to be found. It has an
+  edge of its own now, better than 3:1 against both the field and the panel
+  around it.
+
+The build test checks the parts of this that live in the markup: the doctype,
+`lang` and encoding, the file input's place in the tab order and its focus ring,
+the four live regions, no control inside another, and that every element the
+script looks up exists. The behaviour was checked by driving the built file in
+Chromium with axe at WCAG 2.2 AA, which reports nothing in either colour scheme.
+
 ## 1.0.0
 
 The first published release.

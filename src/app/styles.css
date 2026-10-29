@@ -12,6 +12,10 @@
 	--bg: #ffffff;
 	--panel: #f6f6f7;
 	--edge: #dcdcdf;
+	/* The edge of a field you type into. --edge is decoration and sits near 1.3:1;
+	   this one is 3:1 or better against both the page and the panel, so the field
+	   can be found. */
+	--edge-control: #8a8a96;
 	--ink: #16161a;
 	--dim: #5b5b66;
 	--accent: #6b3fd4;
@@ -27,6 +31,7 @@
 		--bg: #14141a;
 		--panel: #1d1d25;
 		--edge: #32323d;
+		--edge-control: #6e6e7c;
 		--ink: #e9e9ee;
 		--dim: #a0a0ad;
 		--accent: #b39bff;
@@ -51,6 +56,27 @@
  */
 [hidden] {
 	display: none !important;
+}
+
+/*
+ * Out of sight, still in the accessibility tree and still focusable.
+ *
+ * The file input wears this rather than `hidden` or `display: none`, both of
+ * which take it out of the tab order, and then "Choose a file" cannot be
+ * reached from the keyboard at all. Its label is the visible button, and the
+ * focus ring is drawn on the label below.
+ */
+.visually-hidden {
+	position: absolute;
+	width: 1px;
+	height: 1px;
+	margin: -1px;
+	padding: 0;
+	border: 0;
+	overflow: hidden;
+	clip: rect(0 0 0 0);
+	clip-path: inset(50%);
+	white-space: nowrap;
 }
 
 body {
@@ -177,9 +203,15 @@ button.ghost:hover,
 	color: var(--danger);
 }
 
-:focus-visible {
+:focus-visible,
+.visually-hidden:focus-visible + label {
 	outline: 2px solid var(--accent);
 	outline-offset: 2px;
+}
+
+/* A heading that takes focus after "Clear everything" removes the button. */
+[tabindex='-1']:focus {
+	outline: none;
 }
 
 video {
@@ -203,11 +235,13 @@ video {
 }
 
 textarea {
+	/* Block, so the button below sits where it did before the page had a doctype. */
+	display: block;
 	width: 100%;
 	font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
 	font-size: 0.8rem;
 	padding: 0.5rem;
-	border: 1px solid var(--edge);
+	border: 1px solid var(--edge-control);
 	border-radius: 6px;
 	background: var(--bg);
 	color: var(--ink);
@@ -217,10 +251,17 @@ textarea {
 
 /* ── Feedback ─────────────────────────────────────────────────────────────── */
 
+/*
+ * The live regions are in the page from the start and are never hidden, because
+ * a region that appears at the same moment as its text is often not announced.
+ * They carry no box of their own, so an empty one takes no space; the box is on
+ * the message inside.
+ */
 .notice {
 	border-radius: var(--radius);
 	padding: 0.75rem 1rem;
 	border: 1px solid var(--edge);
+	margin: 0 0 0.75rem;
 }
 
 .notice.error {
