@@ -46,6 +46,10 @@ repository and the workflow filename. If publishing ever fails with an
 authentication error, check that configuration first: renaming
 `.github/workflows/publish-npm.yml` or moving the repository invalidates it.
 
+The workflow checks the registry before it publishes and skips the publish when
+the version is already there, so a version published by hand still gets its
+GitHub release and digest from the same run.
+
 The publish step is the one place here that runs `npm` rather than `pnpm`. pnpm
 gained OIDC publishing in its 11 line and this repository is pinned to pnpm 10,
 so `pnpm publish` would look for a token, find none, and fail.
