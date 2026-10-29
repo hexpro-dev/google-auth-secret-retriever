@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 1.0.1
 
 The offline app, made usable from a keyboard and with a screen reader. The
 library is unchanged.
