@@ -69,7 +69,9 @@ describe('fitWithin', () => {
 			expect(pixels, `long edge ${long}`).toBeGreaterThanOrEqual(previous - 1);
 			previous = pixels;
 		}
-	});
+		// Coverage instrumentation makes this loop about six times slower, which
+		// takes it past the default five seconds under `test:coverage`.
+	}, 20_000);
 
 	it('keeps the aspect ratio', () => {
 		const fitted = fitWithin(flat(4000, 3000, 128), 1600);
